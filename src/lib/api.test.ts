@@ -212,6 +212,31 @@ describe('callImageApi', () => {
     }])
   })
 
+  it('enables streaming for image edits to avoid upstream gateway timeouts', async () => {
+    const nativeFetch = globalThis.fetch
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      if (String(input).startsWith('data:')) return nativeFetch(input, init)
+      return Promise.resolve(new Response(JSON.stringify({
+        data: [{ b64_json: 'aW1hZ2U=' }],
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }))
+    })
+
+    await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key', streamImages: false },
+      prompt: 'edit prompt',
+      params: { ...DEFAULT_PARAMS },
+      inputImageDataUrls: ['data:image/png;base64,aW1hZ2U='],
+    })
+
+    const [, init] = fetchMock.mock.calls.find(([url]) => !String(url).startsWith('data:'))!
+    const body = (init as RequestInit).body as FormData
+    expect(body.get('stream')).toBe('true')
+    expect(body.get('partial_images')).toBe('1')
+  })
+
   it('streams Images API partial images and resolves the final completed image', async () => {
     const streamBody = [
       'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbA=="}',

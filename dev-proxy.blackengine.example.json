@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "prefix": "/api-proxy",
+  "target": "https://api.blackengine.top/v1",
+  "changeOrigin": true,
+  "secure": true
+}

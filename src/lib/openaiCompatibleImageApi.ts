@@ -479,6 +479,11 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     ? `${PROMPT_REWRITE_GUARD_PREFIX}\n${sizePrompt}`
     : sizePrompt
   const isEdit = inputImageDataUrls.length > 0
+  // Image edits upload the source image (and often a mask), so upstream image
+  // gateways are more likely to hit an idle response timeout. Prefer streaming
+  // for edits even when the profile has not enabled it explicitly; the server
+  // can then send progress events before its reverse proxy times out.
+  const streamImages = profile.streamImages || isEdit
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
@@ -514,7 +519,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       if (profile.responseFormatB64Json) {
         formData.append('response_format', 'b64_json')
       }
-      if (profile.streamImages) {
+      if (streamImages) {
         formData.append('stream', 'true')
         formData.append('partial_images', String(getStreamPartialImages(profile)))
       }
@@ -579,7 +584,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       if (profile.responseFormatB64Json) {
         body.response_format = 'b64_json'
       }
-      if (profile.streamImages) {
+      if (streamImages) {
         body.stream = true
         body.partial_images = getStreamPartialImages(profile)
       }
@@ -598,10 +603,10 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
 
     if (!response.ok) {
       const errorMessage = await getApiErrorMessage(response)
-      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
+      throw new Error(maybeAppendStreamingHint(errorMessage, response.status, streamImages))
     }
 
-    if (profile.streamImages && isEventStreamResponse(response)) {
+    if (streamImages && isEventStreamResponse(response)) {
       return parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
     }
 
