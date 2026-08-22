@@ -22,6 +22,7 @@ import {
   PROMPT_REWRITE_GUARD_PREFIX,
 } from './imageApiShared'
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
+import { isServerManagedApi } from './serverManagedApi'
 import { prependCodexCliSizePrompt } from './size'
 
 function getStreamPartialImages(profile: ApiProfile): number {
@@ -85,8 +86,22 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
 }
 
 function createRequestHeaders(profile: ApiProfile): Record<string, string> {
+  return profile.apiKey.trim() ? { Authorization: `Bearer ${profile.apiKey}` } : {}
+}
+
+function encodeAuditHeader(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function createPromptAuditHeaders(prompt: string, isEdit: boolean, params: TaskParams): Record<string, string> {
+  if (!isServerManagedApi()) return {}
   return {
-    Authorization: `Bearer ${profile.apiKey}`,
+    'X-Image-Prompt-B64': encodeAuditHeader(prompt.slice(0, 2000)),
+    'X-Image-Action': isEdit ? 'edit' : 'generate',
+    'X-Image-Params-B64': encodeAuditHeader(JSON.stringify({ size: params.size, quality: params.quality, n: params.n })),
   }
 }
 
@@ -482,7 +497,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = { ...createRequestHeaders(profile), ...createPromptAuditHeaders(originalPrompt, isEdit, params) }
   const paths = createOpenAICompatiblePaths()
 
   const controller = new AbortController()
@@ -776,7 +791,7 @@ async function extractCustomImages(payload: unknown, result: CustomProviderResul
 }
 
 async function submitCustomRequest(mapping: CustomProviderSubmitMapping, opts: CallApiOptions, profile: ApiProfile, controller: AbortController, proxyConfig: ReturnType<typeof readClientDevProxyConfig>, useApiProxy: boolean): Promise<unknown> {
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = { ...createRequestHeaders(profile), ...createPromptAuditHeaders(opts.prompt, opts.inputImageDataUrls.length > 0, opts.params) }
   const context = createCustomProviderContext(opts, profile)
   const method = mapping.method ?? 'POST'
   const contentType = mapping.contentType ?? 'json'
@@ -991,7 +1006,7 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
-  const requestHeaders = createRequestHeaders(profile)
+  const requestHeaders = { ...createRequestHeaders(profile), ...createPromptAuditHeaders(prompt, inputImageDataUrls.length > 0, params) }
   const controller = new AbortController()
   const timeoutId = setTimeout(() => controller.abort(), profile.timeout * 1000)
 

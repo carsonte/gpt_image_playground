@@ -18,6 +18,7 @@ import { shouldUseApiProxy } from './devProxy'
 import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApiUrl } from './defaultApiUrl'
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './customProviderConfigUrl'
+import { isServerManagedApi } from './serverManagedApi'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -758,10 +759,11 @@ export function importCustomProviderSettingsFromJson(
     const profiles = profileEntries.map((entry) => entry.profile)
     if (!options.deploymentConfig) return { customProviders, profiles }
 
+    const presetProfileFields = Object.fromEntries(profileEntries.map((entry) => [entry.profile.id, Object.keys(entry.source)]))
     return {
       customProviders,
       profiles,
-      presetProfileFields: Object.fromEntries(profileEntries.map((entry) => [entry.profile.id, Object.keys(entry.source)])),
+      ...(profileEntries.length > 0 ? { presetProfileFields } : {}),
     }
   }
 
@@ -807,7 +809,7 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
 export function validateApiProfile(profile: ApiProfile): string | null {
   if (!profile.name.trim()) return '缺少名称'
   if (profile.provider !== 'fal' && !profile.baseUrl.trim() && !shouldUseApiProxy(profile.apiProxy)) return '缺少 API URL'
-  if (!profile.apiKey.trim()) return '缺少 API Key'
+  if (!profile.apiKey.trim() && !(isServerManagedApi() && shouldUseApiProxy(profile.apiProxy))) return '缺少 API Key'
   if (!profile.model.trim()) return '缺少模型 ID'
   return null
 }

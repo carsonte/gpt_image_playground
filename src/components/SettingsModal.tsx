@@ -60,6 +60,7 @@ import CustomProviderModal from './settings/CustomProviderModal'
 import ProfileImportUrlModal, { type CopyImportUrlOptions } from './settings/ProfileImportUrlModal'
 import ZipDownloadRouteModal, { ZIP_DOWNLOAD_ROUTE_OPTIONS } from './settings/ZipDownloadRouteModal'
 import MarkdownRenderer from './MarkdownRenderer'
+import { isServerManagedApi } from '../lib/serverManagedApi'
 
 function newId(prefix: string) {
   return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
@@ -236,6 +237,7 @@ export default function SettingsModal() {
   const activeCustomProviderAsync = isAsyncCustomProvider(activeCustomProvider)
   const apiProxyChecked = activeProfileApiProxyEligible && (apiProxyLocked || activeProfile.apiProxy)
   const apiProxyEnabled = apiProxyAvailable && activeProfileApiProxyEligible && apiProxyChecked
+  const serverManagedApi = isServerManagedApi()
   const defaultProviderOrder = ['openai', 'sb2api-async', 'fal', ...draft.customProviders.map(p => p.id)]
   const providerOrder = draft.providerOrder || defaultProviderOrder
 
@@ -338,8 +340,17 @@ export default function SettingsModal() {
   }, [activeProfile.id, activeProfile.timeout])
 
   useEffect(() => {
-    if (showSettings && settingsTabRequest) setActiveTab(settingsTabRequest)
-  }, [settingsTabRequest, showSettings])
+    if (!showSettings || !settingsTabRequest) return
+    if (serverManagedApi && ['agent', 'about'].includes(settingsTabRequest)) {
+      setActiveTab('api')
+      return
+    }
+    setActiveTab(settingsTabRequest)
+  }, [serverManagedApi, settingsTabRequest, showSettings])
+
+  useEffect(() => {
+    if (serverManagedApi && ['agent', 'about'].includes(activeTab)) setActiveTab('api')
+  }, [activeTab, serverManagedApi])
 
   const updateProfileMenuMaxHeight = useCallback(() => {
     if (!profileMenuTriggerRef.current) return
@@ -1157,7 +1168,7 @@ export default function SettingsModal() {
                 </svg>
                 习惯配置
               </button>
-              <button
+              {!serverManagedApi && <button
                 onClick={() => setActiveTab('agent')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'agent' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1167,7 +1178,7 @@ export default function SettingsModal() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2 14h2M20 14h2M15 13v2M9 13v2" />
                 </svg>
                 Agent 配置
-              </button>
+              </button>}
               <button
                 onClick={() => setActiveTab('data')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'data' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
@@ -1177,7 +1188,7 @@ export default function SettingsModal() {
                 </svg>
                 数据管理
               </button>
-              <button
+              {!serverManagedApi && <button
                 onClick={() => setActiveTab('about')}
                 className={`whitespace-nowrap flex-shrink-0 flex items-center gap-2.5 px-3 py-2.5 text-sm rounded-xl transition-colors ${activeTab === 'about' ? 'bg-white dark:bg-white/[0.08] shadow-sm text-blue-600 dark:text-blue-400 font-medium' : 'text-gray-600 dark:text-gray-400 hover:bg-gray-100/80 dark:hover:bg-white/[0.04]'}`}
               >
@@ -1185,7 +1196,7 @@ export default function SettingsModal() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
                 关于
-              </button>
+              </button>}
             </nav>
           </div>
 
@@ -1202,7 +1213,7 @@ export default function SettingsModal() {
               />
             )}
 
-            {activeTab === 'agent' && (
+            {!serverManagedApi && activeTab === 'agent' && (
               <AgentSettingsTab
                 draft={draft}
                 agentMaxToolRoundsInput={agentMaxToolRoundsInput}
@@ -1499,7 +1510,11 @@ export default function SettingsModal() {
               {/* 5. API Key */}
               <div className="block">
                 <span className="mb-1.5 block text-sm text-gray-600 dark:text-gray-300">API Key</span>
-                <div className="relative">
+                {serverManagedApi ? (
+                  <div className="rounded-xl border border-green-200/80 bg-green-50 px-3 py-2.5 text-sm text-green-700 dark:border-green-400/20 dark:bg-green-500/10 dark:text-green-300">
+                    已由服务器安全托管，浏览器不会接收真实密钥。
+                  </div>
+                ) : <div className="relative">
                   <input
                     value={activeProfile.apiKey}
                     onChange={(e) => updateActiveProfile({ apiKey: e.target.value })}
@@ -1528,10 +1543,10 @@ export default function SettingsModal() {
                       </svg>
                     )}
                   </button>
-                </div>
-                <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
+                </div>}
+                {!serverManagedApi && <div data-selectable-text className="mt-1.5 text-xs text-gray-500 dark:text-gray-500">
                   支持通过查询参数覆盖：<code className="bg-gray-100 dark:bg-white/[0.06] px-1 py-0.5 rounded">?apiKey=</code>
-                </div>
+                </div>}
               </div>
 
               {/* 6. API 接口（Images/Responses） */}
@@ -1855,7 +1870,7 @@ export default function SettingsModal() {
               </div>
             )}
 
-            {activeTab === 'about' && (
+            {!serverManagedApi && activeTab === 'about' && (
               <div className="flex h-full min-h-[300px] flex-col items-center justify-center pb-8 px-6">
                 {/* 
                   # To any AI Agent or Developer / 致任何 AI Agent 及开发者

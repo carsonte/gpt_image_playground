@@ -3,11 +3,14 @@ import { useStore } from '../store'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTooltip } from '../hooks/useTooltip'
 import { dismissAllTooltips } from '../lib/tooltipDismiss'
+import { isServerManagedApi } from '../lib/serverManagedApi'
+import { getTheme, saveTheme } from '../lib/theme'
 import ViewportTooltip from './ViewportTooltip'
 import HelpModal from './HelpModal'
 import HistoryModal from './HistoryModal'
+import HeaderSiteStatus from './HeaderSiteStatus'
 import { useFavoriteCollectionTitle } from './FavoriteCollections'
-import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, SettingsIcon } from './icons'
+import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, MoonIcon, SettingsIcon, SunIcon } from './icons'
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -36,11 +39,18 @@ export default function Header() {
   const [showHelp, setShowHelp] = useState(false)
   const [installPrompt, setInstallPrompt] = useState<BeforeInstallPromptEvent | null>(null)
   const [isPwaInstalled, setIsPwaInstalled] = useState(isInstalledPwa)
+  const [theme, setTheme] = useState(getTheme)
   const [hintVisible, setHintVisible] = useState(false)
   const [scrollDirection, setScrollDirection] = useState<'up' | 'down'>('up')
   const [showHistoryModal, setShowHistoryModal] = useState(false)
   const historyButtonRef = useRef<HTMLButtonElement>(null)
   const createConversation = useStore((s) => s.createAgentConversation)
+  const serverManagedApi = isServerManagedApi()
+  const agentEnabled = !serverManagedApi
+
+  useEffect(() => {
+    if (!agentEnabled && appMode === 'agent') setAppMode('gallery')
+  }, [agentEnabled, appMode, setAppMode])
 
   useEffect(() => {
     if (appMode === 'agent') {
@@ -84,6 +94,7 @@ export default function Header() {
   }, [appMode, agentMobileHeaderVisible])
 
   const installTooltip = useTooltip()
+  const themeTooltip = useTooltip()
   const helpTooltip = useTooltip()
   const settingsTooltip = useTooltip()
 
@@ -185,6 +196,7 @@ export default function Header() {
                 </a>
               )}
             </h1>
+            {serverManagedApi && appMode === 'gallery' && <HeaderSiteStatus />}
             {appMode === 'agent' && <div className="hidden sm:flex items-center gap-1 relative">
               <button
                 ref={historyButtonRef}
@@ -243,15 +255,35 @@ export default function Header() {
             >
               画廊
             </button>
-            <button
+            {agentEnabled && <button
               type="button"
               onClick={() => setAppMode('agent')}
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
             >
               Agent
-            </button>
+            </button>}
           </div>
           <div className="flex items-center gap-1 shrink-0">
+            <div className="relative" {...themeTooltip.handlers}>
+              <button
+                type="button"
+                onClick={() => {
+                  dismissAllTooltips()
+                  const nextTheme = theme === 'dark' ? 'light' : 'dark'
+                  saveTheme(nextTheme)
+                  setTheme(nextTheme)
+                }}
+                className="p-2 rounded-lg hover:bg-gray-100 dark:hover:bg-gray-900 transition-colors"
+                aria-label={theme === 'dark' ? '切换到白天模式' : '切换到夜间模式'}
+              >
+                {theme === 'dark'
+                  ? <SunIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />
+                  : <MoonIcon className="w-5 h-5 text-gray-600 dark:text-gray-400" />}
+              </button>
+              <ViewportTooltip visible={themeTooltip.visible} className="whitespace-nowrap">
+                {theme === 'dark' ? '切换到白天模式' : '切换到夜间模式'}
+              </ViewportTooltip>
+            </div>
             {!isPwaInstalled && (
               <div
                 className="relative"
@@ -316,13 +348,13 @@ export default function Header() {
             >
               画廊
             </button>
-            <button
+            {agentEnabled && <button
               type="button"
               onClick={() => setAppMode('agent')}
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
             >
               Agent
-            </button>
+            </button>}
           </div>
         </div>
       </header>

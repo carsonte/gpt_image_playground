@@ -43,9 +43,39 @@ async function embedDefaultConfig(value: string) {
 
 export default defineConfig(async ({ command, mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const serverManagedApi = (process.env.VITE_SERVER_MANAGED_API ?? env.VITE_SERVER_MANAGED_API) === 'true'
+  const appServerUrl = process.env.APP_SERVER_URL ?? env.APP_SERVER_URL ?? 'http://127.0.0.1:8788'
   const defaultApiUrl = await embedDefaultConfig(process.env.VITE_DEFAULT_API_URL ?? env.VITE_DEFAULT_API_URL ?? '')
   if (defaultApiUrl.startsWith('embedded-config:')) process.env.VITE_DEFAULT_API_URL = defaultApiUrl
-  const devProxyConfig = command === 'serve' ? loadDevProxyConfig() : null
+  const devServer = command === 'serve' && mode !== 'test'
+  const devProxyConfig = devServer && !serverManagedApi ? loadDevProxyConfig() : null
+  const proxy = devServer && serverManagedApi
+    ? {
+        '/api': {
+          target: appServerUrl,
+          changeOrigin: true,
+          xfwd: true,
+        },
+        '/api-proxy': {
+          target: appServerUrl,
+          changeOrigin: true,
+          xfwd: true,
+        },
+      }
+    : devProxyConfig?.enabled
+      ? {
+          [devProxyConfig.prefix]: {
+            target: devProxyConfig.target,
+            changeOrigin: devProxyConfig.changeOrigin,
+            secure: devProxyConfig.secure,
+            rewrite: (path: string) =>
+              path.replace(
+                new RegExp(`^${devProxyConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
+                '',
+              ),
+          },
+        }
+      : undefined
 
   return {
     plugins: [react()],
@@ -56,21 +86,7 @@ export default defineConfig(async ({ command, mode }) => {
     },
     server: {
       host: true,
-      proxy:
-        devProxyConfig?.enabled
-          ? {
-              [devProxyConfig.prefix]: {
-                target: devProxyConfig.target,
-                changeOrigin: devProxyConfig.changeOrigin,
-                secure: devProxyConfig.secure,
-                rewrite: (path) =>
-                  path.replace(
-                    new RegExp(`^${devProxyConfig.prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`),
-                    '',
-                  ),
-              },
-            }
-          : undefined,
+      proxy,
     },
   }
 })

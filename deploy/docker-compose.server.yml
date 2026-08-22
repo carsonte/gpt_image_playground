@@ -1,0 +1,30 @@
+services:
+  gpt-image-playground:
+    build:
+      context: ..
+      dockerfile: deploy/server.Dockerfile
+    image: gpt-image-playground-server:local
+    container_name: gpt-image-playground
+    environment:
+      UPSTREAM_API_URL: https://api.blackengine.top/v1
+      UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:?请设置 UPSTREAM_API_KEY}
+      UPSTREAM_MODEL: ${UPSTREAM_MODEL:-gpt-image-2}
+      UPSTREAM_CONCURRENCY: ${UPSTREAM_CONCURRENCY:-4}
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?请设置 ADMIN_PASSWORD_HASH}
+      SESSION_SECRET: ${SESSION_SECRET:?请设置 SESSION_SECRET}
+      STATS_HASH_SECRET: ${STATS_HASH_SECRET:?请设置 STATS_HASH_SECRET}
+      REQUEST_LOG_RETENTION_DAYS: ${REQUEST_LOG_RETENTION_DAYS:-30}
+      AUDIT_LOG_RETENTION_DAYS: ${AUDIT_LOG_RETENTION_DAYS:-180}
+      IP_ACTIVITY_RETENTION_DAYS: ${IP_ACTIVITY_RETENTION_DAYS:-90}
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8080/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s

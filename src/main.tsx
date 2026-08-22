@@ -2,11 +2,14 @@ import 'core-js/actual/array/at'
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
 import App from './App'
+import AdminApp from './admin/AdminApp'
 import 'streamdown/styles.css'
 import 'katex/dist/katex.min.css'
 import './index.css'
+import { applyTheme, getTheme } from './lib/theme'
 import { installMobileViewportGuards } from './lib/viewport'
 
+applyTheme(getTheme())
 installMobileViewportGuards()
 
 if ('serviceWorker' in navigator) {
@@ -25,6 +28,6 @@ if ('serviceWorker' in navigator) {
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    {window.location.pathname.startsWith('/admin') ? <AdminApp /> : <App />}
   </StrictMode>,
 )

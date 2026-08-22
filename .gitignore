@@ -4,3 +4,8 @@ dev-proxy.config.json
 .wrangler/
 .env.local
 .env.*.local
+.deploy.local
+*.tgz
+data/
+deploy/.env.server
+.audit/
