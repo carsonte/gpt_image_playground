@@ -2,7 +2,7 @@
 
 ## 不依赖 GitHub：本地直传更新
 
-当前宝塔服务器使用压缩包部署时，在本地项目目录执行：
+当前生产环境采用此方式。在本地项目目录执行：
 
 ```bash
 npm run deploy:server
@@ -12,6 +12,15 @@ npm run deploy:server
 
 这条命令会在本地完成测试和构建，自动打包并通过 SSH 上传。服务器会备份源码和 SQLite 数据库，构建新镜像并检查健康状态；失败时恢复旧镜像、源码和数据库。更新包不会包含 API Key、后台密码、数据库、图片或本地环境配置。
 
+标准发布顺序：
+
+1. 合并或完成本地改动。
+2. 执行 `npm run verify:release`。
+3. 在浏览器验收前台和后台。
+4. 提交并推送到 `origin/main`。
+5. 执行 `npm run deploy:server`。
+6. 确认公网 `/api/health`、`/api/queue/status` 和容器健康状态。
+
 验证已经单独完成、只需重试上传时，可使用：
 
 ```bash
@@ -20,7 +29,7 @@ npm run deploy:server -- --skip-verify
 
 只检查本地打包、不连接服务器时，可使用 `npm run deploy:server -- --skip-verify --dry-run`。
 
-## 使用私有 Git 仓库更新
+## 备用方式：服务器通过 Git 更新
 
 正式部署后，在宝塔终端进入项目目录，执行：
 
@@ -47,15 +56,15 @@ cp deploy/.env.server.example deploy/.env.server
 
 编辑 `deploy/.env.server`，填入 API Key、后台密码哈希及两个随机密钥。该文件已被 Git 忽略，不会随着代码更新被覆盖。
 
-默认只从我们自己仓库的 `origin/stable` 更新。`stable` 只接收已经在本地完成代码检查、测试、构建和人工验收的版本。服务器不会直接跟随原作者仓库，避免未经检查的上游改动直接上线。
+该脚本默认配置仍可用于 Git 部署，但当前生产服务器使用上面的本地直传流程。不要让生产服务器直接跟随官方 `upstream`，避免未经检查的改动直接上线。
 
 需要临时使用其他远程仓库或分支时：
 
 ```bash
-DEPLOY_REMOTE=production DEPLOY_BRANCH=stable bash deploy/update-server.sh
+DEPLOY_REMOTE=origin DEPLOY_BRANCH=main bash deploy/update-server.sh
 ```
 
-正式上线时，应将服务器 Git 远程地址配置成你拥有权限的私有仓库或专用部署仓库。当前本地 `origin` 指向原作者仓库，不能用于发布你的定制版本。远程仓库规划和上游合并流程见 `docs/update-workflow.md`。
+如以后切换到 Git 部署，应确保服务器的 `origin` 指向定制仓库 `https://github.com/carsonte/gpt_image_playground.git`。官方仓库仅作为本地 `upstream`。远程仓库规划和上游合并流程见 `docs/update-workflow.md`。
 
 ## 恢复与排查
 
@@ -64,3 +73,11 @@ DEPLOY_REMOTE=production DEPLOY_BRANCH=stable bash deploy/update-server.sh
 - 容器日志：`docker compose --env-file deploy/.env.server -f deploy/docker-compose.server.yml logs --tail=200`
 
 不要把 Docker Socket 挂载给网站容器，也不要把更新命令做成公网后台接口。更新操作仅通过宝塔终端或 SSH 执行。
+
+## 最近一次生产更新
+
+- 日期：2026-08-22。
+- 版本：`v0.7.6`。
+- 提交：`8099594`。
+- 方式：`npm run deploy:server -- --skip-verify`（完整发布验证已提前通过）。
+- 结果：源码和 SQLite 备份完成，新镜像构建成功，容器状态 `healthy`，公网健康检查通过。

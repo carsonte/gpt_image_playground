@@ -2,6 +2,15 @@
 
 最后更新：2026-08-22
 
+## 当前版本
+
+- 应用版本：`v0.7.6`
+- 当前发布分支：`main`
+- 当前发布提交：`8099594 merge: upstream v0.7.6`
+- 定制仓库：`https://github.com/carsonte/gpt_image_playground.git`
+- 官方上游：`https://github.com/CookSleep/gpt_image_playground.git`
+- 官方 `v0.7.6` 已完成差异检查、冲突处理、完整验证、推送和生产部署。
+
 ## 当前状态
 
 - 本地项目目录：`C:\Users\wooop\Desktop\gpt-img`
@@ -73,14 +82,17 @@
 ## 验证记录
 
 - `npm run build`：通过。
-- `npm test -- --run`：33 个测试文件、496 个测试全部通过。
+- `npm test`：33 个测试文件、512 个测试全部通过。
 - `npm run test:server`：通过。
+- `npm run verify:release`：通过。
 - Docker 生产构建：通过。
 - 容器健康检查：通过。
 - HTTP 反向代理：通过。
 - HTTPS 证书与跳转：通过。
 - 正式首页加载：通过。
-- 尚未执行真实生图测试，避免未经确认消耗上游 API 额度。
+- 生产接口 `/api/health` 返回 `ok: true`、`upstreamConfigured: true`。
+- 生产队列接口 `/api/queue/status` 返回并发上限 `4`。
+- 生产容器状态为 `healthy`。
 
 ## 敏感信息规则
 
@@ -91,12 +103,10 @@
 
 ## 后续工作
 
-1. 用户确认后执行一次正式生图，验证 BlackEngine 全链路。
-2. 验证后台登录、公告发布、实时任务和生成记录在正式域名下的行为。
-3. 将定制版本推送到自己的私有仓库或专用部署仓库。
-4. 建立 `stable` 分支，服务器更新只跟随经过本地测试和人工验收的版本。
-5. 首次稳定运行后创建数据库和部署目录备份。
-6. 后续更新使用 `bash deploy/update-server.sh`，更新失败时自动回滚。
+1. 后续官方更新先合并到本地，完成冲突排查、测试、构建和浏览器验收后再发布。
+2. 较大版本更新可先创建临时集成分支，确认兼容后合入 `main`。
+3. 继续观察正式环境的生图成功率、平均耗时、并发队列和异常日志。
+4. 定期检查 `deploy/data/backups/`，确认 SQLite 备份可以正常恢复。
 
 ## 一键直传更新
 
@@ -105,6 +115,9 @@
 - 服务器执行器：`deploy/update-from-bundle.sh`
 - 不依赖 Git 仓库，适用于当前压缩包部署方式。
 - 自动执行发布验证、打包、上传、源码备份、SQLite 在线备份、Docker 构建、健康检查和失败回滚。
+- 已在生产环境实际执行并验证成功。
+- 已单独完成发布验证、仅需重新上传时可运行 `npm run deploy:server -- --skip-verify`。
+- `.deploy.local` 和专用 SSH 私钥只保存在本机，不进入 Git。
 
 ## 后续接手提示
 
