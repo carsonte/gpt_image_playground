@@ -80,19 +80,19 @@ try {
   if (!cookie) throw new Error('登录响应缺少会话 Cookie')
 
   const initialQueueSettings = await request('/api/admin/settings/queue', { headers: { Cookie: cookie } })
-  if (initialQueueSettings.payload.concurrency !== 1) throw new Error('队列默认并发配置不正确')
+  if (initialQueueSettings.payload.concurrency !== 1 || initialQueueSettings.payload.perIpConcurrency !== 1 || initialQueueSettings.payload.perIpQueueLimit !== 3) throw new Error('队列默认配置不正确')
   const updatedQueueSettings = await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 2 }),
+    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2 }),
   })
-  if (updatedQueueSettings.payload.concurrency !== 2) throw new Error('后台队列并发配置未生效')
+  if (updatedQueueSettings.payload.concurrency !== 2 || updatedQueueSettings.payload.perIpConcurrency !== 1 || updatedQueueSettings.payload.perIpQueueLimit !== 2) throw new Error('后台队列配置未生效')
   const publicQueueSettings = await request('/api/queue/status')
   if (publicQueueSettings.payload.concurrency !== 2) throw new Error('前台队列状态未同步后台配置')
   await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 1 }),
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3 }),
   })
   const initialSiteSettings = await request('/api/admin/settings/site', { headers: { Cookie: cookie } })
   if (!initialSiteSettings.payload.privacyNoticeEnabled || !initialSiteSettings.payload.queueStatusEnabled) throw new Error('首页提示默认配置不正确')
@@ -177,6 +177,61 @@ try {
   await request(`/api/admin/ip-blocks/${blocked.payload.id}`, {
     method: 'DELETE',
     headers: { Cookie: cookie, Origin: origin },
+  })
+
+  await request('/api/admin/settings/queue', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
+    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 1 }),
+  })
+  maxUpstreamActive = 0
+  const limitedIpHeaders = { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.10' }
+  const firstLimitedRequest = fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: limitedIpHeaders,
+    body: JSON.stringify({ prompt: 'IP 限制测试一' }),
+  })
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const status = await request('/api/queue/status')
+    if (status.payload.active === 1) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  const secondLimitedRequest = fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: limitedIpHeaders,
+    body: JSON.stringify({ prompt: 'IP 限制测试二' }),
+  })
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const status = await request('/api/queue/status')
+    if (status.payload.waiting === 1) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  const rejectedByIpLimit = await fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: limitedIpHeaders,
+    body: JSON.stringify({ prompt: 'IP 限制测试三' }),
+  })
+  if (rejectedByIpLimit.status !== 429 || rejectedByIpLimit.headers.get('retry-after') !== '10') throw new Error('单 IP 超额请求未被限流')
+  const otherIpRequest = fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Forwarded-For': '198.51.100.20' },
+    body: JSON.stringify({ prompt: '其他 IP 公平调度测试' }),
+  })
+  let observedFairScheduling = false
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const liveTasks = await request('/api/admin/queue/tasks', { headers: { Cookie: cookie } })
+    if (liveTasks.payload.active.some((item) => item.ipAddress === '198.51.100.20') && liveTasks.payload.waiting.some((item) => item.ipAddress === '198.51.100.10')) {
+      observedFairScheduling = true
+      break
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  const limitedResponses = await Promise.all([firstLimitedRequest, secondLimitedRequest, otherIpRequest])
+  if (limitedResponses.some((response) => !response.ok) || !observedFairScheduling || maxUpstreamActive !== 2) throw new Error('不同 IP 未获得公平并发调度')
+  await request('/api/admin/settings/queue', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3 }),
   })
 
   maxUpstreamActive = 0

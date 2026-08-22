@@ -43,6 +43,8 @@ type KeywordStat = {
 
 type QueueSettings = {
   concurrency: number
+  perIpConcurrency: number
+  perIpQueueLimit: number
   active: number
   waiting: number
 }
@@ -70,6 +72,8 @@ type LiveQueueTask = {
 
 type LiveQueueStatus = {
   concurrency: number
+  perIpConcurrency: number
+  perIpQueueLimit: number
   active: LiveQueueTask[]
   waiting: LiveQueueTask[]
 }
@@ -171,6 +175,8 @@ export default function AdminApp() {
   const [topKeywords, setTopKeywords] = useState<KeywordStat[]>([])
   const [queueSettings, setQueueSettings] = useState<QueueSettings | null>(null)
   const [queueConcurrency, setQueueConcurrency] = useState('4')
+  const [perIpConcurrency, setPerIpConcurrency] = useState('1')
+  const [perIpQueueLimit, setPerIpQueueLimit] = useState('3')
   const [siteSettings, setSiteSettings] = useState<SiteSettings | null>(null)
   const [liveQueue, setLiveQueue] = useState<LiveQueueStatus | null>(null)
 
@@ -195,6 +201,8 @@ export default function AdminApp() {
   ]).then(([nextQueueSettings, nextSiteSettings]) => {
     setQueueSettings(nextQueueSettings)
     setQueueConcurrency(String(nextQueueSettings.concurrency))
+    setPerIpConcurrency(String(nextQueueSettings.perIpConcurrency))
+    setPerIpQueueLimit(String(nextQueueSettings.perIpQueueLimit))
     setSiteSettings(nextSiteSettings)
   })
   const loadAnnouncements = () => apiRequest<{ announcements: Announcement[] }>('/api/admin/announcements').then((result) => setAnnouncements(result.announcements))
@@ -221,10 +229,16 @@ export default function AdminApp() {
     try {
       const result = await apiRequest<QueueSettings>('/api/admin/settings/queue', {
         method: 'PUT',
-        body: JSON.stringify({ concurrency: Number(queueConcurrency) }),
+        body: JSON.stringify({
+          concurrency: Number(queueConcurrency),
+          perIpConcurrency: Number(perIpConcurrency),
+          perIpQueueLimit: Number(perIpQueueLimit),
+        }),
       })
       setQueueSettings(result)
       setQueueConcurrency(String(result.concurrency))
+      setPerIpConcurrency(String(result.perIpConcurrency))
+      setPerIpQueueLimit(String(result.perIpQueueLimit))
     } catch (err) {
       setError(err instanceof Error ? err.message : '队列设置保存失败')
     }
@@ -474,11 +488,11 @@ export default function AdminApp() {
 
           {tab === 'settings' && (
             <section>
-              <div className="mb-5"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">集中管理生成并发和首页公开提示，修改后立即生效。</p></div>
+              <div className="mb-5"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">集中管理生成并发、IP 使用限制和首页公开提示，修改后立即生效。</p></div>
               <form onSubmit={saveQueueSettings} className="mb-5 flex flex-wrap items-end gap-4 rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900">
-                <div className="min-w-0 flex-1"><h2 className="font-bold">全站生成队列</h2><p className="mt-1 text-xs text-gray-500">已有任务不会中断，新请求按先进先出排队。</p></div>
-                <div className="flex items-end gap-2"><label className="text-sm">同时生成数量<input type="number" min="1" max="20" value={queueConcurrency} onChange={(e) => setQueueConcurrency(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><button type="submit" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">保存</button></div>
-                {queueSettings && <div className="w-full text-xs text-gray-500">当前：生成中 {queueSettings.active} · 排队 {queueSettings.waiting} · 并发上限 {queueSettings.concurrency}</div>}
+                <div className="min-w-[260px] flex-1"><h2 className="font-bold">全站生成队列</h2><p className="mt-1 text-xs text-gray-500">同一 IP 达到上限后不会继续占用全站并发，其他 IP 可优先获得空闲位置。</p></div>
+                <div className="flex flex-wrap items-end gap-2"><label className="text-sm">全站同时生成<input type="number" min="1" max="20" value={queueConcurrency} onChange={(e) => setQueueConcurrency(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><label className="text-sm">单 IP 同时生成<input type="number" min="1" max="20" value={perIpConcurrency} onChange={(e) => setPerIpConcurrency(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><label className="text-sm">单 IP 最多排队<input type="number" min="0" max="100" value={perIpQueueLimit} onChange={(e) => setPerIpQueueLimit(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><button type="submit" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">保存</button></div>
+                {queueSettings && <div className="w-full text-xs text-gray-500">当前：生成中 {queueSettings.active} · 排队 {queueSettings.waiting} · 全站并发 {queueSettings.concurrency} · 单 IP 并发 {queueSettings.perIpConcurrency} · 单 IP 排队 {queueSettings.perIpQueueLimit}</div>}
               </form>
               {siteSettings && <form onSubmit={saveSiteSettings} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div><h2 className="font-bold">首页顶部提示</h2><p className="mt-1 text-xs text-gray-500">控制首页标题旁的本地存储提示和生图队列状态。</p></div><div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]"><label className="text-sm">本地存储提示文字<input value={siteSettings.privacyNoticeText} onChange={(e) => setSiteSettings({ ...siteSettings, privacyNoticeText: e.target.value })} maxLength={200} className={`${fieldClass()} mt-1`} /></label><div className="flex flex-wrap items-center gap-4 rounded-xl bg-gray-50 px-4 py-2 dark:bg-white/[0.04]"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={siteSettings.privacyNoticeEnabled} onChange={(e) => setSiteSettings({ ...siteSettings, privacyNoticeEnabled: e.target.checked })} />显示本地存储提示</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={siteSettings.queueStatusEnabled} onChange={(e) => setSiteSettings({ ...siteSettings, queueStatusEnabled: e.target.checked })} />显示生图队列状态</label></div></div><div className="mt-4 flex items-center justify-between gap-3"><span className="text-xs text-gray-400">最多 200 个字符，前台约 5 秒内同步。</span><button type="submit" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">保存提示设置</button></div></form>}
             </section>

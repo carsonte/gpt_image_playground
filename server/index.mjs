@@ -40,6 +40,14 @@ const savedConcurrency = Number.parseInt(readAppSetting('upstream_concurrency', 
 let upstreamConcurrency = Number.isFinite(savedConcurrency)
   ? Math.max(1, Math.min(20, savedConcurrency))
   : config.upstreamConcurrency
+const savedPerIpConcurrency = Number.parseInt(readAppSetting('per_ip_concurrency', ''), 10)
+let perIpConcurrency = Number.isFinite(savedPerIpConcurrency)
+  ? Math.max(1, Math.min(20, savedPerIpConcurrency))
+  : 1
+const savedPerIpQueueLimit = Number.parseInt(readAppSetting('per_ip_queue_limit', ''), 10)
+let perIpQueueLimit = Number.isFinite(savedPerIpQueueLimit)
+  ? Math.max(0, Math.min(100, savedPerIpQueueLimit))
+  : 3
 let privacyNoticeEnabled = readAppSetting('privacy_notice_enabled', 'true') === 'true'
 let privacyNoticeText = readAppSetting('privacy_notice_text', defaultPrivacyNotice)
 let queueStatusEnabled = readAppSetting('queue_status_enabled', 'true') === 'true'
@@ -96,7 +104,13 @@ function getResolutionTier(size) {
 
 function runProxyQueue() {
   while (activeProxyRequests < upstreamConcurrency && proxyQueue.length) {
-    const item = proxyQueue.shift()
+    const activeByIp = new Map()
+    for (const item of activeProxyItems.values()) {
+      activeByIp.set(item.ipAddress, (activeByIp.get(item.ipAddress) ?? 0) + 1)
+    }
+    const idx = proxyQueue.findIndex((item) => (activeByIp.get(item.metadata.ipAddress) ?? 0) < perIpConcurrency)
+    if (idx < 0) return
+    const [item] = proxyQueue.splice(idx, 1)
     if (item.req.aborted) {
       item.resolve(null)
       continue
@@ -316,9 +330,16 @@ app.post('/api-proxy/*path', async (req, res) => {
   let quality = typeof auditParams.quality === 'string' ? auditParams.quality.slice(0, 40) : ''
   const requestedAction = String(req.headers['x-image-action'] ?? '')
   const action = ['generate', 'edit'].includes(requestedAction) ? requestedAction : endpoint === '/images/edits' ? 'edit' : 'generate'
-  const queuedBehind = Math.max(0, activeProxyRequests + proxyQueue.length - upstreamConcurrency + 1)
-  if (queuedBehind) {
-    addLog({ requestId, type: 'request', event: 'image.queued', ipHash, status: 'queued', details: { endpoint, position: queuedBehind } })
+  const activeForIp = [...activeProxyItems.values()].filter((item) => item.ipAddress === ipAddress).length
+  const waitingForIp = proxyQueue.filter((item) => item.metadata.ipAddress === ipAddress).length
+  if (activeForIp + waitingForIp >= perIpConcurrency + perIpQueueLimit) {
+    res.setHeader('Retry-After', '10')
+    addLog({ requestId, level: 'warn', type: 'security', event: 'ip.queue_limited', ipHash, status: 'rejected', details: { endpoint } })
+    return res.status(429).json({ error: `当前 IP 的任务过多，最多同时生成 ${perIpConcurrency} 个、排队 ${perIpQueueLimit} 个，请稍后再试`, requestId })
+  }
+  const willQueue = activeProxyRequests >= upstreamConcurrency || activeForIp >= perIpConcurrency
+  if (willQueue) {
+    addLog({ requestId, type: 'request', event: 'image.queued', ipHash, status: 'queued', details: { endpoint, position: proxyQueue.length + 1 } })
   }
   const slot = await acquireProxySlot(req, { requestId, ipAddress, endpoint, action, prompt, size, imageCount })
   if (!slot) return
@@ -499,7 +520,7 @@ app.post('/api/admin/logout', (req, res) => {
 })
 
 app.get('/api/admin/settings/queue', (_req, res) => {
-  res.json({ concurrency: upstreamConcurrency, active: activeProxyRequests, waiting: proxyQueue.length })
+  res.json({ concurrency: upstreamConcurrency, perIpConcurrency, perIpQueueLimit, active: activeProxyRequests, waiting: proxyQueue.length })
 })
 
 app.get('/api/admin/queue/tasks', (_req, res) => {
@@ -507,6 +528,8 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
   res.setHeader('Cache-Control', 'no-store')
   res.json({
     concurrency: upstreamConcurrency,
+    perIpConcurrency,
+    perIpQueueLimit,
     active: [...activeProxyItems.values()].map((item) => ({
       requestId: item.requestId,
       ipAddress: item.ipAddress,
@@ -537,14 +560,29 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
 
 app.put('/api/admin/settings/queue', (req, res) => {
   const concurrency = Number.parseInt(req.body.concurrency, 10)
+  const nextPerIpConcurrency = Number.parseInt(req.body.perIpConcurrency, 10)
+  const nextPerIpQueueLimit = Number.parseInt(req.body.perIpQueueLimit, 10)
   if (!Number.isFinite(concurrency) || concurrency < 1 || concurrency > 20) {
     return res.status(400).json({ error: '并发数量必须是 1–20 的整数' })
   }
+  if (!Number.isFinite(nextPerIpConcurrency) || nextPerIpConcurrency < 1 || nextPerIpConcurrency > 20) {
+    return res.status(400).json({ error: '单 IP 并发必须是 1–20 的整数' })
+  }
+  if (!Number.isFinite(nextPerIpQueueLimit) || nextPerIpQueueLimit < 0 || nextPerIpQueueLimit > 100) {
+    return res.status(400).json({ error: '单 IP 排队上限必须是 0–100 的整数' })
+  }
   upstreamConcurrency = concurrency
-  saveAppSetting('upstream_concurrency', concurrency)
+  perIpConcurrency = nextPerIpConcurrency
+  perIpQueueLimit = nextPerIpQueueLimit
+  const saveQueueSettings = db.transaction(() => {
+    saveAppSetting('upstream_concurrency', concurrency)
+    saveAppSetting('per_ip_concurrency', perIpConcurrency)
+    saveAppSetting('per_ip_queue_limit', perIpQueueLimit)
+  })
+  saveQueueSettings()
   runProxyQueue()
-  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency } })
-  res.json({ concurrency: upstreamConcurrency, active: activeProxyRequests, waiting: proxyQueue.length })
+  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit } })
+  res.json({ concurrency: upstreamConcurrency, perIpConcurrency, perIpQueueLimit, active: activeProxyRequests, waiting: proxyQueue.length })
 })
 
 app.get('/api/admin/settings/site', (_req, res) => {
