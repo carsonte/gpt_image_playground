@@ -175,7 +175,7 @@ export default function AdminApp() {
   const [topKeywords, setTopKeywords] = useState<KeywordStat[]>([])
   const [queueSettings, setQueueSettings] = useState<QueueSettings | null>(null)
   const [queueConcurrency, setQueueConcurrency] = useState('4')
-  const [perIpConcurrency, setPerIpConcurrency] = useState('1')
+  const [perIpConcurrency, setPerIpConcurrency] = useState('2')
   const [perIpQueueLimit, setPerIpQueueLimit] = useState('3')
   const [siteSettings, setSiteSettings] = useState<SiteSettings | null>(null)
   const [liveQueue, setLiveQueue] = useState<LiveQueueStatus | null>(null)

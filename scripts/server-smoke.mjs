@@ -80,7 +80,7 @@ try {
   if (!cookie) throw new Error('登录响应缺少会话 Cookie')
 
   const initialQueueSettings = await request('/api/admin/settings/queue', { headers: { Cookie: cookie } })
-  if (initialQueueSettings.payload.concurrency !== 1 || initialQueueSettings.payload.perIpConcurrency !== 1 || initialQueueSettings.payload.perIpQueueLimit !== 3) throw new Error('队列默认配置不正确')
+  if (initialQueueSettings.payload.concurrency !== 1 || initialQueueSettings.payload.perIpConcurrency !== 2 || initialQueueSettings.payload.perIpQueueLimit !== 3) throw new Error('队列默认配置不正确')
   const updatedQueueSettings = await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },

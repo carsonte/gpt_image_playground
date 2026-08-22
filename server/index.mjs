@@ -43,7 +43,7 @@ let upstreamConcurrency = Number.isFinite(savedConcurrency)
 const savedPerIpConcurrency = Number.parseInt(readAppSetting('per_ip_concurrency', ''), 10)
 let perIpConcurrency = Number.isFinite(savedPerIpConcurrency)
   ? Math.max(1, Math.min(20, savedPerIpConcurrency))
-  : 1
+  : 2
 const savedPerIpQueueLimit = Number.parseInt(readAppSetting('per_ip_queue_limit', ''), 10)
 let perIpQueueLimit = Number.isFinite(savedPerIpQueueLimit)
   ? Math.max(0, Math.min(100, savedPerIpQueueLimit))
