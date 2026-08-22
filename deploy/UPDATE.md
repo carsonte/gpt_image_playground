@@ -78,6 +78,7 @@ DEPLOY_REMOTE=origin DEPLOY_BRANCH=main bash deploy/update-server.sh
 
 - 日期：2026-08-22。
 - 版本：`v0.7.6`。
-- 提交：`8099594`。
+- 当前功能基线提交：`4e8e4e1`。
 - 方式：`npm run deploy:server -- --skip-verify`（完整发布验证已提前通过）。
+- 内容：单次生图数量固定为 1；全站默认并发 4；单 IP 默认并发 2、最多排队 3，后台可调整。
 - 结果：源码和 SQLite 备份完成，新镜像构建成功，容器状态 `healthy`，公网健康检查通过。

@@ -6,10 +6,18 @@
 
 - 应用版本：`v0.7.6`
 - 当前发布分支：`main`
-- 当前发布提交：`8099594 merge: upstream v0.7.6`
+- 当前功能基线提交：`4e8e4e1 feat: default per-IP concurrency to two`
 - 定制仓库：`https://github.com/carsonte/gpt_image_playground.git`
 - 官方上游：`https://github.com/CookSleep/gpt_image_playground.git`
 - 官方 `v0.7.6` 已完成差异检查、冲突处理、完整验证、推送和生产部署。
+
+## 2026-08-22 最新更新
+
+- `5ca8968`：新增按真实 IP 的公平队列与运行/排队配额。
+- `b485fdd`：托管版首页数量固定为 1，服务器拒绝任何单次多图请求。
+- `4e8e4e1`：单 IP 默认并发由 1 调整为 2，后台仍可在 1～20 之间修改。
+- 当前默认规则为全站并发 4、单 IP 并发 2、单 IP 最多排队 3、每个请求生成 1 张。
+- 上述更新均已通过测试、构建、Git 推送和生产部署。
 
 ## 当前状态
 
