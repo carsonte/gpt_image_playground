@@ -35,6 +35,7 @@ export default function InputParamsPanel({
   moderationDisabled,
   agentAutoImageCount,
   outputImageLimit,
+  outputImageCountLocked,
   nInput,
   setNInputFocused,
   commitN,
@@ -75,6 +76,7 @@ export default function InputParamsPanel({
   moderationDisabled: boolean
   agentAutoImageCount: boolean
   outputImageLimit: number
+  outputImageCountLocked: boolean
   nInput: string
   setNInputFocused: (focused: boolean) => void
   commitN: () => void
@@ -293,12 +295,12 @@ export default function InputParamsPanel({
               handleNLimitIncreaseAttempt(() => e.preventDefault())
             }
           }}
-          disabled={agentAutoImageCount}
+          disabled={agentAutoImageCount || outputImageCountLocked}
           type={agentAutoImageCount ? 'text' : 'number'}
           min={agentAutoImageCount ? undefined : 1}
           max={agentAutoImageCount ? undefined : outputImageLimit}
           className={`px-3 py-1.5 rounded-xl border border-gray-200/60 dark:border-white/[0.08] focus:outline-none text-xs transition-all duration-200 shadow-sm ${
-            agentAutoImageCount
+            agentAutoImageCount || outputImageCountLocked
               ? 'bg-gray-100/50 dark:bg-white/[0.05] opacity-50 cursor-not-allowed'
               : 'bg-white/50 dark:bg-white/[0.03]'
           }`}

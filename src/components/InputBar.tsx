@@ -466,12 +466,15 @@ export default function InputBar() {
   const transparentOutputEnabled = transparentOutputAvailable && showTransparentOutputControl && params.transparent_output
   const compressionDisabled = params.output_format === 'png' || isFalProvider
   const outputImageLimit = getOutputImageLimitForSettings(effectiveSettings)
+  const outputImageCountLocked = outputImageLimit === 1
   const isFalTextToImage = isFalProvider && inputImages.length === 0
   const nDraftValue = Number(nInput)
   const effectiveNValue = Number.isNaN(nDraftValue) ? params.n : nDraftValue
   const streamConcurrentByN = activeProfile.provider === 'openai' && activeProfile.streamImages === true && !agentAutoImageCount && effectiveNValue > 1
   const nLimitHintText = agentAutoImageCount
     ? 'Agent 模式下数量由模型根据提示词自动决定'
+    : outputImageCountLocked
+    ? '当前服务每次固定生成 1 张图片'
     : isFalProvider
     ? `fal.ai 最大请求数量为 ${outputImageLimit}`
     : `OpenAI 最大请求数量为 ${outputImageLimit}`
@@ -690,13 +693,18 @@ export default function InputBar() {
       setNInput('auto')
       return
     }
+    if (outputImageCountLocked) {
+      setNInput('1')
+      setParams({ n: 1 })
+      return
+    }
     const nextValue = Number(nInput)
     const normalizedValue =
       nInput.trim() === '' ? DEFAULT_PARAMS.n : Number.isNaN(nextValue) ? params.n : nextValue
     const clampedValue = Math.min(outputImageLimit, Math.max(1, normalizedValue))
     setNInput(String(clampedValue))
     setParams({ n: clampedValue })
-  }, [agentAutoImageCount, nInput, nLimitHint, outputImageLimit, params.n, setParams])
+  }, [agentAutoImageCount, nInput, nLimitHint, outputImageCountLocked, outputImageLimit, params.n, setParams])
 
   const showNLimitHint = useCallback(() => {
     nLimitHint.show()
@@ -707,21 +715,21 @@ export default function InputBar() {
   }, [nLimitHint])
 
   const showAgentNHint = useCallback(() => {
-    if (agentAutoImageCount) showNLimitHint()
-  }, [agentAutoImageCount, showNLimitHint])
+    if (agentAutoImageCount || outputImageCountLocked) showNLimitHint()
+  }, [agentAutoImageCount, outputImageCountLocked, showNLimitHint])
 
   const clearAgentNHintTouchTimer = useCallback(() => {
     nLimitHint.clearTimer()
   }, [nLimitHint])
 
   const startAgentNHintTouch = useCallback(() => {
-    if (!agentAutoImageCount) return
+    if (!agentAutoImageCount && !outputImageCountLocked) return
     nLimitHint.startTouch()
-  }, [agentAutoImageCount, nLimitHint])
+  }, [agentAutoImageCount, outputImageCountLocked, nLimitHint])
 
   const handleNInputChange = useCallback((value: string) => {
-    if (agentAutoImageCount) {
-      setNInput('auto')
+    if (agentAutoImageCount || outputImageCountLocked) {
+      setNInput(agentAutoImageCount ? 'auto' : '1')
       return
     }
     setNInput(value)
@@ -731,10 +739,10 @@ export default function InputBar() {
     } else {
       hideNLimitHint()
     }
-  }, [agentAutoImageCount, hideNLimitHint, outputImageLimit, showNLimitHint])
+  }, [agentAutoImageCount, hideNLimitHint, outputImageCountLocked, outputImageLimit, showNLimitHint])
 
   const handleNLimitIncreaseAttempt = useCallback((preventDefault: () => void) => {
-    if (agentAutoImageCount) {
+    if (agentAutoImageCount || outputImageCountLocked) {
       preventDefault()
       showNLimitHint()
       return
@@ -745,7 +753,7 @@ export default function InputBar() {
 
     preventDefault()
     showNLimitHint()
-  }, [agentAutoImageCount, nInput, nInputFocused, outputImageLimit, params.n, showNLimitHint])
+  }, [agentAutoImageCount, nInput, nInputFocused, outputImageCountLocked, outputImageLimit, params.n, showNLimitHint])
 
   const clearImageHintTimer = () => {
     if (imageHintTimerRef.current != null) {
@@ -1533,6 +1541,7 @@ export default function InputBar() {
       moderationDisabled={moderationDisabled}
       agentAutoImageCount={agentAutoImageCount}
       outputImageLimit={outputImageLimit}
+      outputImageCountLocked={outputImageCountLocked}
       nInput={nInput}
       setNInputFocused={setNInputFocused}
       commitN={commitN}

@@ -324,7 +324,11 @@ app.post('/api-proxy/*path', async (req, res) => {
   if (!config.upstreamApiKey) return res.status(503).json({ error: '服务器尚未配置上游 API Key', requestId })
 
   const auditParams = readParamsAudit(req)
-  let imageCount = Math.max(1, Math.min(10, Number.parseInt(auditParams.n ?? 1, 10) || 1))
+  const auditedImageCount = Math.max(1, Number.parseInt(auditParams.n ?? 1, 10) || 1)
+  if (auditedImageCount > 1) {
+    return res.status(400).json({ error: '当前服务每次只能生成 1 张图片', requestId })
+  }
+  const imageCount = 1
   let prompt = readPromptAudit(req)
   let size = typeof auditParams.size === 'string' ? auditParams.size.slice(0, 40) : ''
   let quality = typeof auditParams.quality === 'string' ? auditParams.quality.slice(0, 40) : ''
@@ -356,7 +360,9 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (!prompt && typeof payload.prompt === 'string') prompt = payload.prompt.trim().slice(0, 5000)
         if (typeof payload.size === 'string') size = payload.size.slice(0, 40)
         if (typeof payload.quality === 'string') quality = payload.quality.slice(0, 40)
-        imageCount = Math.max(1, Math.min(10, Number.parseInt(payload.n ?? auditParams.n ?? 1, 10) || 1))
+        const requestedImageCount = Math.max(1, Number.parseInt(payload.n ?? auditParams.n ?? 1, 10) || 1)
+        if (requestedImageCount > 1) return res.status(400).json({ error: '当前服务每次只能生成 1 张图片', requestId })
+        if (endpoint.startsWith('/images/')) payload.n = 1
         body = Buffer.from(JSON.stringify(payload))
       } else {
         body = Readable.toWeb(req)

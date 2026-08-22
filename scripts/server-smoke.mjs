@@ -140,14 +140,20 @@ try {
   if (publicResult.payload.announcements[0]?.id !== id) throw new Error('已发布公告未出现在公共接口')
 
   await request('/api/visits', { method: 'POST' })
+  const rejectedImageCount = await fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '数量限制测试', n: 2 }),
+  })
+  if (rejectedImageCount.status !== 400) throw new Error('服务器未拒绝单次多图请求')
   await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 2 }),
+    body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 1 }),
   })
   const summary = await request('/api/admin/stats/summary?period=7d', { headers: { Cookie: cookie } })
   if (summary.payload.visits !== 1 || summary.payload.uniqueIps !== 1) throw new Error('访问统计结果不正确')
-  if (summary.payload.requests !== 1 || summary.payload.images !== 2 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
+  if (summary.payload.requests !== 1 || summary.payload.images !== 1 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
   if (!Number.isFinite(summary.payload.averageDurationMs) || summary.payload.averageDurationMs < 100) throw new Error('平均完成耗时统计结果不正确')
 
   const generations = await request('/api/admin/generations', { headers: { Cookie: cookie } })
