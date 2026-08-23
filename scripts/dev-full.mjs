@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 const env = {
   ...process.env,
   VITE_SERVER_MANAGED_API: 'true',
-  VITE_DEFAULT_API_URL: 'https://proxy?model=gpt-image-2&apiMode=images',
+  VITE_DEFAULT_API_URL: 'https://proxy?model=gpt-image-2&apiMode=images&streamImages=true&streamPartialImages=2',
   VITE_API_PROXY_AVAILABLE: 'true',
   VITE_API_PROXY_LOCKED: 'true',
   VITE_SHOW_PRESET_CONFIG_ONLY: 'true',

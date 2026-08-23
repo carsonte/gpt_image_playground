@@ -3,7 +3,7 @@ FROM node:22-bookworm-slim AS build
 WORKDIR /app
 
 ENV VITE_SERVER_MANAGED_API=true
-ENV VITE_DEFAULT_API_URL=https://proxy?model=gpt-image-2&apiMode=images
+ENV VITE_DEFAULT_API_URL=https://proxy?model=gpt-image-2&apiMode=images&streamImages=true&streamPartialImages=2
 ENV VITE_API_PROXY_AVAILABLE=true
 ENV VITE_API_PROXY_LOCKED=true
 ENV VITE_SHOW_PRESET_CONFIG_ONLY=true
