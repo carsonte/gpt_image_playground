@@ -11,6 +11,8 @@ import HistoryModal from './HistoryModal'
 import HeaderSiteStatus from './HeaderSiteStatus'
 import { useFavoriteCollectionTitle } from './FavoriteCollections'
 import { EditIcon, HelpCircleIcon, HistoryIcon, InstallIcon, MoonIcon, SettingsIcon, SunIcon } from './icons'
+import { getActiveApiProfile } from '../lib/apiProfiles'
+import { getProfileImageModule } from '../lib/imageModules'
 
 type BeforeInstallPromptEvent = Event & {
   prompt: () => Promise<void>
@@ -25,6 +27,10 @@ function isInstalledPwa() {
 export default function Header() {
   const appMode = useStore((s) => s.appMode)
   const setAppMode = useStore((s) => s.setAppMode)
+  const settings = useStore((s) => s.settings)
+  const setSettings = useStore((s) => s.setSettings)
+  const setParams = useStore((s) => s.setParams)
+  const clearInputImages = useStore((s) => s.clearInputImages)
   const setShowSettings = useStore((s) => s.setShowSettings)
   const setConfirmDialog = useStore((s) => s.setConfirmDialog)
   const agentMobileHeaderVisible = useStore((s) => s.agentMobileHeaderVisible)
@@ -43,14 +49,40 @@ export default function Header() {
   const [hintVisible, setHintVisible] = useState(false)
   const [scrollDirection, setScrollDirection] = useState<'up' | 'down'>('up')
   const [showHistoryModal, setShowHistoryModal] = useState(false)
+  const [showU1SwitchNotice, setShowU1SwitchNotice] = useState(false)
   const historyButtonRef = useRef<HTMLButtonElement>(null)
+  const u1SwitchNoticeTimerRef = useRef<number | null>(null)
   const createConversation = useStore((s) => s.createAgentConversation)
   const serverManagedApi = isServerManagedApi()
   const agentEnabled = !serverManagedApi
+  const imageModule = getProfileImageModule(getActiveApiProfile(settings))
+
+  const selectImageModule = (module: 'gpt' | 'sensenova-u1') => {
+    const profile = settings.profiles.find((item) => getProfileImageModule(item) === module)
+    if (!profile) return
+    if (module === 'sensenova-u1' && imageModule !== 'sensenova-u1') {
+      if (u1SwitchNoticeTimerRef.current != null) window.clearTimeout(u1SwitchNoticeTimerRef.current)
+      setShowU1SwitchNotice(true)
+      u1SwitchNoticeTimerRef.current = window.setTimeout(() => {
+        setShowU1SwitchNotice(false)
+        u1SwitchNoticeTimerRef.current = null
+      }, 2000)
+    }
+    setAppMode('gallery')
+    setSettings({ activeProfileId: profile.id })
+    clearInputImages()
+    setParams(module === 'sensenova-u1'
+      ? { size: '2048x2048', quality: 'auto', output_format: 'png', moderation: 'auto', n: 1, transparent_output: false }
+      : { size: 'auto', quality: 'auto', output_format: 'png', moderation: 'auto', n: 1, transparent_output: false })
+  }
 
   useEffect(() => {
     if (!agentEnabled && appMode === 'agent') setAppMode('gallery')
   }, [agentEnabled, appMode, setAppMode])
+
+  useEffect(() => () => {
+    if (u1SwitchNoticeTimerRef.current != null) window.clearTimeout(u1SwitchNoticeTimerRef.current)
+  }, [])
 
   useEffect(() => {
     if (appMode === 'agent') {
@@ -247,8 +279,28 @@ export default function Header() {
               </div>
             </div>
           )}
-          <div className="hidden sm:flex items-center gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mr-4">
-            <button
+          <div className="relative hidden sm:flex items-center gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mr-4">
+            {serverManagedApi ? <>
+              <button
+                type="button"
+                onClick={() => selectImageModule('gpt')}
+                className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && imageModule === 'gpt' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+              >
+                GPT 生图
+              </button>
+              <button
+                type="button"
+                onClick={() => selectImageModule('sensenova-u1')}
+                className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && imageModule === 'sensenova-u1' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+              >
+                U1 信息图
+              </button>
+              {showU1SwitchNotice && (
+                <div className="pointer-events-none absolute right-0 top-full z-50 mt-2 whitespace-nowrap rounded-xl bg-gray-900 px-3 py-2 text-xs font-medium text-white shadow-xl ring-1 ring-white/10 animate-fade-in dark:bg-white dark:text-gray-900">
+                  这个模型除了快以外，就剩下快了
+                </div>
+              )}
+            </> : <><button
               type="button"
               onClick={() => setAppMode('gallery')}
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
@@ -261,7 +313,7 @@ export default function Header() {
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
             >
               Agent
-            </button>}
+            </button>}</>}
           </div>
           <div className="flex items-center gap-1 shrink-0">
             <div className="relative" {...themeTooltip.handlers}>
@@ -340,8 +392,28 @@ export default function Header() {
           </div>
         </div>
         <div className={`safe-area-x sm:hidden overflow-hidden transition-all duration-300 ease-in-out ${appMode === 'gallery' && scrollDirection === 'down' ? 'max-h-0 opacity-0 pb-0' : 'max-h-20 opacity-100 pb-2'}`}>
-          <div className="grid grid-cols-2 gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mx-2">
-            <button
+          <div className="relative grid grid-cols-2 gap-1 rounded-xl border border-gray-200 dark:border-white/[0.08] bg-gray-100/70 dark:bg-white/[0.04] p-1 mx-2">
+            {serverManagedApi ? <>
+              <button
+                type="button"
+                onClick={() => selectImageModule('gpt')}
+                className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && imageModule === 'gpt' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+              >
+                GPT 生图
+              </button>
+              <button
+                type="button"
+                onClick={() => selectImageModule('sensenova-u1')}
+                className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' && imageModule === 'sensenova-u1' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
+              >
+                U1 信息图
+              </button>
+              {showU1SwitchNotice && (
+                <div className="pointer-events-none absolute right-0 top-full z-50 mt-2 whitespace-nowrap rounded-xl bg-gray-900 px-3 py-2 text-xs font-medium text-white shadow-xl ring-1 ring-white/10 animate-fade-in dark:bg-white dark:text-gray-900">
+                  这个模型除了快以外，就剩下快了
+                </div>
+              )}
+            </> : <><button
               type="button"
               onClick={() => setAppMode('gallery')}
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'gallery' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
@@ -354,7 +426,7 @@ export default function Header() {
               className={`px-4 py-1.5 rounded-lg text-sm transition-colors ${appMode === 'agent' ? 'bg-white dark:bg-white/10 text-gray-900 dark:text-white shadow-sm font-medium' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}
             >
               Agent
-            </button>}
+            </button>}</>}
           </div>
         </div>
       </header>

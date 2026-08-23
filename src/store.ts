@@ -68,6 +68,7 @@ import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefa
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
 import { stripInjectedCodexCliSizePrompt } from './lib/size'
+import { getProfileImageModule, isSenseNovaU1Size } from './lib/imageModules'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -1676,6 +1677,12 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
     return
   }
 
+  const senseNovaU1 = getProfileImageModule(activeProfile) === 'sensenova-u1'
+  if (senseNovaU1 && (inputImages.length > 0 || maskDraft)) {
+    showToast('U1 信息图当前仅支持文字生成，请先移除参考图和遮罩', 'error')
+    return
+  }
+
   let orderedInputImages = inputImages
   let maskImageId: string | null = null
   let maskTargetImageId: string | null = null
@@ -1714,6 +1721,13 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
 
   const normalizedParams = normalizeParamsForSettings(params, requestSettings, { hasInputImages: orderedInputImages.length > 0 })
+  if (senseNovaU1) {
+    normalizedParams.size = isSenseNovaU1Size(params.size) ? params.size : '2048x2048'
+    normalizedParams.n = 1
+    normalizedParams.quality = 'auto'
+    normalizedParams.output_format = 'png'
+    normalizedParams.transparent_output = false
+  }
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)

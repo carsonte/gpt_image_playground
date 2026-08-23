@@ -21,6 +21,8 @@ import ButtonTooltip from './input/buttonTooltip'
 import DragUploadOverlay from './input/dragUploadOverlay'
 import InputBatchBars from './input/inputBatchBars'
 import InputParamsPanel from './input/inputParamsPanel'
+import { getProfileImageModule, getTaskImageModule } from '../lib/imageModules'
+import SenseNovaSizeModal from './SenseNovaSizeModal'
 
 /** API 支持的最大参考图数量 */
 const API_MAX_IMAGES = 16
@@ -118,8 +120,10 @@ export default function InputBar() {
   const filteredTasks = useMemo(() => {
     const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
     const q = searchQuery.trim().toLowerCase()
+    const imageModule = getProfileImageModule(getActiveApiProfile(settings))
     
     return sorted.filter((t) => {
+      if (getTaskImageModule(t) !== imageModule) return false
       if (filterFavorite) {
         if (!t.isFavorite) return false
         if (activeFavoriteCollectionId && activeFavoriteCollectionId !== ALL_FAVORITES_COLLECTION_ID && !getTaskFavoriteCollectionIds(t, defaultFavoriteCollectionId).includes(activeFavoriteCollectionId)) return false
@@ -127,7 +131,7 @@ export default function InputBar() {
       if (!taskMatchesFilterStatus(t, filterStatus)) return false
       return taskMatchesSearchQuery(t, q)
     })
-  }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
+  }, [tasks, settings, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
 
   const inCollectionOverview = filterFavorite && !activeFavoriteCollectionId
 
@@ -437,7 +441,8 @@ export default function InputBar() {
     ? maskDraft ? '遮罩编辑' : '生成图像'
     : '请先配置 API'
   const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
-  const promptPlaceholder = '描述你想生成的图片，可输入 @ 来指定参考图...'
+  const senseNovaU1 = getProfileImageModule(activeProfile) === 'sensenova-u1'
+  const promptPlaceholder = senseNovaU1 ? '描述你想制作的信息图、海报或知识卡片...' : '描述你想生成的图片，可输入 @ 来指定参考图...'
   const submitCurrentMode = useCallback(() => {
     if (appMode === 'agent') {
       void submitAgentMessage()
@@ -494,8 +499,10 @@ export default function InputBar() {
         { label: 'medium', value: 'medium' },
         { label: 'high', value: 'high' },
       ]
-  const atImageLimit = inputImages.length >= API_MAX_IMAGES
-  const uploadImageTooltipText = atImageLimit ? `参考图数量已达上限（${API_MAX_IMAGES} 张），无法继续添加` : '上传图片'
+  const atImageLimit = senseNovaU1 || inputImages.length >= API_MAX_IMAGES
+  const uploadImageTooltipText = senseNovaU1
+    ? 'U1 信息图当前仅支持文字生成'
+    : atImageLimit ? `参考图数量已达上限（${API_MAX_IMAGES} 张），无法继续添加` : '上传图片'
   const transparentOutputHint = useHintTooltip()
   const handleTransparentOutputMenuOpenChange = useCallback((open: boolean) => {
     if (open) transparentOutputHint.hide()
@@ -1569,13 +1576,21 @@ export default function InputBar() {
       <DragUploadOverlay visible={isDragging} atImageLimit={atImageLimit} maxImages={API_MAX_IMAGES} />
 
       {showSizePicker && (
-        <SizePickerModal
-          currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
-          onSelect={(size) => setParams({ size })}
-          onClose={() => setShowSizePicker(false)}
-          allowAuto={!isFalTextToImage}
-          codexCli={activeProfile.codexCli}
-        />
+        senseNovaU1 ? (
+          <SenseNovaSizeModal
+            currentSize={params.size}
+            onSelect={(size) => setParams({ size })}
+            onClose={() => setShowSizePicker(false)}
+          />
+        ) : (
+          <SizePickerModal
+            currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
+            onSelect={(size) => setParams({ size })}
+            onClose={() => setShowSizePicker(false)}
+            allowAuto={!isFalTextToImage}
+            codexCli={activeProfile.codexCli}
+          />
+        )
       )}
 
       <div

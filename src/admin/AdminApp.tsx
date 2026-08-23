@@ -23,6 +23,7 @@ type Summary = {
   failed: number
   averageDurationMs: number | null
   resolutions: Array<{ tier: string; requests: number; images: number }>
+  modules: Array<{ module: 'gpt' | 'sensenova-u1'; requests: number; images: number; averageDurationMs: number | null }>
 }
 
 type DailyTrend = {
@@ -47,6 +48,12 @@ type QueueSettings = {
   perIpQueueLimit: number
   active: number
   waiting: number
+  senseNovaConcurrency: number
+  senseNovaPerIpConcurrency: number
+  senseNovaPerIpQueueLimit: number
+  senseNovaActive: number
+  senseNovaWaiting: number
+  senseNovaConfigured: boolean
 }
 
 type SiteSettings = {
@@ -57,6 +64,7 @@ type SiteSettings = {
 
 type LiveQueueTask = {
   requestId: string
+  module: 'gpt' | 'sensenova-u1'
   ipAddress: string
   action: 'generate' | 'edit'
   endpoint: string
@@ -116,6 +124,7 @@ type GenerationRecord = {
   id: number
   requestId: string
   ipAddress: string
+  module: 'gpt' | 'sensenova-u1'
   action: 'generate' | 'edit'
   model: string
   prompt: string
@@ -172,11 +181,15 @@ export default function AdminApp() {
   const [generationQuery, setGenerationQuery] = useState('')
   const [generationDateFrom, setGenerationDateFrom] = useState('')
   const [generationDateTo, setGenerationDateTo] = useState('')
+  const [generationModule, setGenerationModule] = useState('')
   const [topKeywords, setTopKeywords] = useState<KeywordStat[]>([])
   const [queueSettings, setQueueSettings] = useState<QueueSettings | null>(null)
   const [queueConcurrency, setQueueConcurrency] = useState('4')
   const [perIpConcurrency, setPerIpConcurrency] = useState('2')
   const [perIpQueueLimit, setPerIpQueueLimit] = useState('3')
+  const [senseNovaConcurrencyInput, setSenseNovaConcurrencyInput] = useState('2')
+  const [senseNovaPerIpConcurrencyInput, setSenseNovaPerIpConcurrencyInput] = useState('1')
+  const [senseNovaPerIpQueueLimitInput, setSenseNovaPerIpQueueLimitInput] = useState('2')
   const [siteSettings, setSiteSettings] = useState<SiteSettings | null>(null)
   const [liveQueue, setLiveQueue] = useState<LiveQueueStatus | null>(null)
 
@@ -203,6 +216,9 @@ export default function AdminApp() {
     setQueueConcurrency(String(nextQueueSettings.concurrency))
     setPerIpConcurrency(String(nextQueueSettings.perIpConcurrency))
     setPerIpQueueLimit(String(nextQueueSettings.perIpQueueLimit))
+    setSenseNovaConcurrencyInput(String(nextQueueSettings.senseNovaConcurrency))
+    setSenseNovaPerIpConcurrencyInput(String(nextQueueSettings.senseNovaPerIpConcurrency))
+    setSenseNovaPerIpQueueLimitInput(String(nextQueueSettings.senseNovaPerIpQueueLimit))
     setSiteSettings(nextSiteSettings)
   })
   const loadAnnouncements = () => apiRequest<{ announcements: Announcement[] }>('/api/admin/announcements').then((result) => setAnnouncements(result.announcements))
@@ -220,6 +236,7 @@ export default function AdminApp() {
     if (generationQuery.trim()) params.set('q', generationQuery.trim())
     if (generationDateFrom) params.set('dateFrom', new Date(`${generationDateFrom}T00:00:00`).toISOString())
     if (generationDateTo) params.set('dateTo', new Date(new Date(`${generationDateTo}T00:00:00`).getTime() + 86400_000).toISOString())
+    if (generationModule) params.set('module', generationModule)
     return apiRequest<{ items: GenerationRecord[] }>(`/api/admin/generations?${params}`).then((result) => setGenerations(result.items))
   }
 
@@ -233,12 +250,18 @@ export default function AdminApp() {
           concurrency: Number(queueConcurrency),
           perIpConcurrency: Number(perIpConcurrency),
           perIpQueueLimit: Number(perIpQueueLimit),
+          senseNovaConcurrency: Number(senseNovaConcurrencyInput),
+          senseNovaPerIpConcurrency: Number(senseNovaPerIpConcurrencyInput),
+          senseNovaPerIpQueueLimit: Number(senseNovaPerIpQueueLimitInput),
         }),
       })
       setQueueSettings(result)
       setQueueConcurrency(String(result.concurrency))
       setPerIpConcurrency(String(result.perIpConcurrency))
       setPerIpQueueLimit(String(result.perIpQueueLimit))
+      setSenseNovaConcurrencyInput(String(result.senseNovaConcurrency))
+      setSenseNovaPerIpConcurrencyInput(String(result.senseNovaPerIpConcurrency))
+      setSenseNovaPerIpQueueLimitInput(String(result.senseNovaPerIpQueueLimit))
     } catch (err) {
       setError(err instanceof Error ? err.message : '队列设置保存失败')
     }
@@ -273,7 +296,7 @@ export default function AdminApp() {
     setError('')
     const action = tab === 'dashboard' ? Promise.all([loadDashboard(), loadLiveQueue()]) : tab === 'live' ? loadLiveQueue() : tab === 'settings' ? loadSettings() : tab === 'generations' ? loadGenerations() : tab === 'announcements' ? loadAnnouncements() : tab === 'ips' ? loadIps() : loadLogs()
     void action.catch((err) => setError(err.message))
-  }, [authenticated, tab, logType, generationIp, generationQuery, generationDateFrom, generationDateTo])
+  }, [authenticated, tab, logType, generationIp, generationQuery, generationDateFrom, generationDateTo, generationModule])
 
   useEffect(() => {
     if (!authenticated || (tab !== 'dashboard' && tab !== 'live')) return
@@ -428,6 +451,12 @@ export default function AdminApp() {
                   ['平均耗时（含排队）', formatDuration(summary.averageDurationMs)], ['日均生图请求', Math.round(summary.requests / 30 * 10) / 10], ['单日峰值', Math.max(0, ...dailyTrend.map((item) => item.requests))],
                 ].map(([label, value]) => <div key={label} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="text-sm text-gray-500">{label}</div><div className="mt-2 text-3xl font-bold">{value}</div></div>)}
               </div>
+              <div className="mt-6 grid gap-4 md:grid-cols-2">
+                {(['gpt', 'sensenova-u1'] as const).map((module) => {
+                  const item = summary.modules.find((value) => value.module === module)
+                  return <div key={module} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="flex items-center justify-between"><h2 className="font-bold">{module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</h2><span className="rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">独立统计</span></div><div className="mt-4 grid grid-cols-3 gap-3 text-sm"><div><div className="text-gray-500">请求</div><strong className="mt-1 block text-xl">{item?.requests ?? 0}</strong></div><div><div className="text-gray-500">图片</div><strong className="mt-1 block text-xl">{item?.images ?? 0}</strong></div><div><div className="text-gray-500">平均耗时</div><strong className="mt-1 block text-base">{formatDuration(item?.averageDurationMs ?? null)}</strong></div></div></div>
+                })}
+              </div>
 
               <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
                 <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900">
@@ -471,14 +500,14 @@ export default function AdminApp() {
                 <div>
                   <h2 className="mb-3 text-sm font-semibold text-gray-500">正在生成</h2>
                   <div className="space-y-3">
-                    {liveQueue?.active.map((item) => <article key={item.requestId} className="rounded-2xl border border-amber-300/50 bg-amber-50/50 p-4 dark:border-amber-500/20 dark:bg-amber-500/[0.05]"><div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-amber-500 px-2 py-1 font-medium text-white">生成中</span><span className="font-mono font-semibold text-gray-800 dark:text-gray-100">{item.ipAddress}</span><span className="text-gray-400">已运行 {formatDuration(item.runtimeMs ?? 0)}</span><span className="text-gray-400">等待过 {formatDuration(item.waitMs)}</span></div><div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-white/70 px-4 py-3 text-sm dark:bg-white/[0.04]">{item.prompt || '未记录到提示词'}</div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span>尺寸：{item.size || '—'}</span><span>数量：{item.imageCount}</span><span>开始：{localDate(item.startedAt ?? null)}</span><span className="font-mono">ID：{item.requestId}</span></div></article>)}
+                    {liveQueue?.active.map((item) => <article key={item.requestId} className="rounded-2xl border border-amber-300/50 bg-amber-50/50 p-4 dark:border-amber-500/20 dark:bg-amber-500/[0.05]"><div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-amber-500 px-2 py-1 font-medium text-white">生成中</span><span className="rounded-full bg-blue-50 px-2 py-1 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className="font-mono font-semibold text-gray-800 dark:text-gray-100">{item.ipAddress}</span><span className="text-gray-400">已运行 {formatDuration(item.runtimeMs ?? 0)}</span><span className="text-gray-400">等待过 {formatDuration(item.waitMs)}</span></div><div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-white/70 px-4 py-3 text-sm dark:bg-white/[0.04]">{item.prompt || '未记录到提示词'}</div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span>尺寸：{item.size || '—'}</span><span>数量：{item.imageCount}</span><span>开始：{localDate(item.startedAt ?? null)}</span><span className="font-mono">ID：{item.requestId}</span></div></article>)}
                     {!liveQueue?.active.length && <div className="rounded-2xl border border-dashed border-gray-200 bg-white px-5 py-10 text-center text-sm text-gray-500 dark:border-white/[0.08] dark:bg-gray-900">当前没有正在生成的任务</div>}
                   </div>
                 </div>
                 <div>
                   <h2 className="mb-3 text-sm font-semibold text-gray-500">等待队列</h2>
                   <div className="space-y-3">
-                    {liveQueue?.waiting.map((item) => <article key={item.requestId} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900"><div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-gray-100 px-2 py-1 font-medium text-gray-600 dark:bg-white/[0.06] dark:text-gray-300">排队第 {item.position} 位</span><span className="font-mono font-semibold text-gray-800 dark:text-gray-100">{item.ipAddress}</span><span className="text-gray-400">已等待 {formatDuration(item.waitMs)}</span></div><div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-gray-50 px-4 py-3 text-sm dark:bg-white/[0.04]">{item.prompt || '未记录到提示词'}</div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span>尺寸：{item.size || '—'}</span><span>数量：{item.imageCount}</span><span>进入队列：{localDate(item.queuedAt)}</span><span className="font-mono">ID：{item.requestId}</span></div></article>)}
+                    {liveQueue?.waiting.map((item) => <article key={item.requestId} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900"><div className="flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-gray-100 px-2 py-1 font-medium text-gray-600 dark:bg-white/[0.06] dark:text-gray-300">排队第 {item.position} 位</span><span className="rounded-full bg-blue-50 px-2 py-1 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className="font-mono font-semibold text-gray-800 dark:text-gray-100">{item.ipAddress}</span><span className="text-gray-400">已等待 {formatDuration(item.waitMs)}</span></div><div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-gray-50 px-4 py-3 text-sm dark:bg-white/[0.04]">{item.prompt || '未记录到提示词'}</div><div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span>尺寸：{item.size || '—'}</span><span>数量：{item.imageCount}</span><span>进入队列：{localDate(item.queuedAt)}</span><span className="font-mono">ID：{item.requestId}</span></div></article>)}
                     {!liveQueue?.waiting.length && <div className="rounded-2xl border border-dashed border-gray-200 bg-white px-5 py-8 text-center text-sm text-gray-500 dark:border-white/[0.08] dark:bg-gray-900">当前没有排队任务</div>}
                   </div>
                 </div>
@@ -493,6 +522,7 @@ export default function AdminApp() {
                 <div className="min-w-[260px] flex-1"><h2 className="font-bold">全站生成队列</h2><p className="mt-1 text-xs text-gray-500">同一 IP 达到上限后不会继续占用全站并发，其他 IP 可优先获得空闲位置。</p></div>
                 <div className="flex flex-wrap items-end gap-2"><label className="text-sm">全站同时生成<input type="number" min="1" max="20" value={queueConcurrency} onChange={(e) => setQueueConcurrency(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><label className="text-sm">单 IP 同时生成<input type="number" min="1" max="20" value={perIpConcurrency} onChange={(e) => setPerIpConcurrency(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><label className="text-sm">单 IP 最多排队<input type="number" min="0" max="100" value={perIpQueueLimit} onChange={(e) => setPerIpQueueLimit(e.target.value)} className={`${fieldClass()} mt-1 w-28`} /></label><button type="submit" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">保存</button></div>
                 {queueSettings && <div className="w-full text-xs text-gray-500">当前：生成中 {queueSettings.active} · 排队 {queueSettings.waiting} · 全站并发 {queueSettings.concurrency} · 单 IP 并发 {queueSettings.perIpConcurrency} · 单 IP 排队 {queueSettings.perIpQueueLimit}</div>}
+                <div className="w-full border-t border-gray-100 pt-4 dark:border-white/[0.06]"><div className="mb-3 flex flex-wrap items-center gap-2"><h3 className="font-semibold">U1 信息图独立队列</h3><span className={`rounded-full px-2 py-0.5 text-xs ${queueSettings?.senseNovaConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{queueSettings?.senseNovaConfigured ? 'API 已配置' : 'API Key 未配置'}</span></div><div className="flex flex-wrap items-end gap-2"><label className="text-sm">U1 全站同时生成<input type="number" min="1" max="20" value={senseNovaConcurrencyInput} onChange={(e) => setSenseNovaConcurrencyInput(e.target.value)} className={`${fieldClass()} mt-1 w-32`} /></label><label className="text-sm">U1 单 IP 同时生成<input type="number" min="1" max="20" value={senseNovaPerIpConcurrencyInput} onChange={(e) => setSenseNovaPerIpConcurrencyInput(e.target.value)} className={`${fieldClass()} mt-1 w-32`} /></label><label className="text-sm">U1 单 IP 最多排队<input type="number" min="0" max="100" value={senseNovaPerIpQueueLimitInput} onChange={(e) => setSenseNovaPerIpQueueLimitInput(e.target.value)} className={`${fieldClass()} mt-1 w-32`} /></label></div>{queueSettings && <div className="mt-3 text-xs text-gray-500">U1 当前：生成中 {queueSettings.senseNovaActive} · 排队 {queueSettings.senseNovaWaiting}</div>}</div>
               </form>
               {siteSettings && <form onSubmit={saveSiteSettings} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div><h2 className="font-bold">首页顶部提示</h2><p className="mt-1 text-xs text-gray-500">控制首页标题旁的本地存储提示和生图队列状态。</p></div><div className="mt-4 grid gap-4 lg:grid-cols-[minmax(0,1fr)_auto]"><label className="text-sm">本地存储提示文字<input value={siteSettings.privacyNoticeText} onChange={(e) => setSiteSettings({ ...siteSettings, privacyNoticeText: e.target.value })} maxLength={200} className={`${fieldClass()} mt-1`} /></label><div className="flex flex-wrap items-center gap-4 rounded-xl bg-gray-50 px-4 py-2 dark:bg-white/[0.04]"><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={siteSettings.privacyNoticeEnabled} onChange={(e) => setSiteSettings({ ...siteSettings, privacyNoticeEnabled: e.target.checked })} />显示本地存储提示</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={siteSettings.queueStatusEnabled} onChange={(e) => setSiteSettings({ ...siteSettings, queueStatusEnabled: e.target.checked })} />显示生图队列状态</label></div></div><div className="mt-4 flex items-center justify-between gap-3"><span className="text-xs text-gray-400">最多 200 个字符，前台约 5 秒内同步。</span><button type="submit" className="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700">保存提示设置</button></div></form>}
             </section>
@@ -504,14 +534,15 @@ export default function AdminApp() {
               <div className="mb-4 flex flex-wrap items-end gap-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900">
                 <label className="text-sm">文字搜索<input value={generationQuery} onChange={(e) => setGenerationQuery(e.target.value)} className={`${fieldClass()} mt-1 w-64`} placeholder="提示词、模型或请求 ID" /></label>
                 <label className="text-sm">IP 地址<input value={generationIp} onChange={(e) => setGenerationIp(e.target.value)} className={`${fieldClass()} mt-1 w-44 font-mono`} placeholder="留空显示全部" /></label>
+                <label className="text-sm">生图模块<select value={generationModule} onChange={(e) => setGenerationModule(e.target.value)} className={`${fieldClass()} mt-1 w-40`}><option value="">全部模块</option><option value="gpt">GPT 生图</option><option value="sensenova-u1">U1 信息图</option></select></label>
                 <label className="text-sm">开始日期<input type="date" value={generationDateFrom} onChange={(e) => setGenerationDateFrom(e.target.value)} className={`${fieldClass()} mt-1 w-40`} /></label>
                 <label className="text-sm">结束日期<input type="date" value={generationDateTo} onChange={(e) => setGenerationDateTo(e.target.value)} className={`${fieldClass()} mt-1 w-40`} /></label>
-                <button type="button" onClick={() => { setGenerationQuery(''); setGenerationIp(''); setGenerationDateFrom(''); setGenerationDateTo('') }} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm hover:bg-gray-50 dark:border-white/[0.1] dark:hover:bg-white/[0.06]">清空筛选</button>
+                <button type="button" onClick={() => { setGenerationQuery(''); setGenerationIp(''); setGenerationDateFrom(''); setGenerationDateTo(''); setGenerationModule('') }} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm hover:bg-gray-50 dark:border-white/[0.1] dark:hover:bg-white/[0.06]">清空筛选</button>
               </div>
               <div className="space-y-3">
                 {generations.map((item) => (
                   <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900">
-                    <div className="flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2 py-1 font-medium ${item.action === 'edit' ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'}`}>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span className={`rounded-full px-2 py-1 ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10' : item.status === 'failed' ? 'bg-red-50 text-red-600 dark:bg-red-500/10' : 'bg-gray-100 text-gray-500 dark:bg-white/[0.06]'}`}>{item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '处理中'}</span><span className="font-mono text-gray-500">{item.ipAddress || '未知 IP'}</span><span className="text-gray-400">{localDate(item.createdAt)}</span></div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2 py-1 font-medium ${item.action === 'edit' ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'}`}>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span className="rounded-full bg-violet-50 px-2 py-1 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className={`rounded-full px-2 py-1 ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10' : item.status === 'failed' ? 'bg-red-50 text-red-600 dark:bg-red-500/10' : 'bg-gray-100 text-gray-500 dark:bg-white/[0.06]'}`}>{item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '处理中'}</span><span className="font-mono text-gray-500">{item.ipAddress || '未知 IP'}</span><span className="text-gray-400">{localDate(item.createdAt)}</span></div>
                     <div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-700 dark:bg-white/[0.04] dark:text-gray-200">{item.prompt || '未记录到提示词'}</div>
                     <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>模型：{item.model || '—'}</span><span>尺寸：{item.size || '—'}（{item.resolutionTier === 'other' ? '其他' : item.resolutionTier}）</span><span>质量：{item.quality || '—'}</span><span>数量：{item.imageCount}</span><span>耗时：{formatDuration(item.durationMs)}</span><span className="font-mono">ID：{item.requestId}</span></div>
                   </article>

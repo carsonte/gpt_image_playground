@@ -11,6 +11,7 @@ const origin = `http://127.0.0.1:${port}`
 let upstreamActive = 0
 let maxUpstreamActive = 0
 let upstreamPrompts = []
+let upstreamPayloads = []
 const upstream = createServer(async (req, res) => {
   const chunks = []
   await new Promise((resolve) => {
@@ -20,6 +21,7 @@ const upstream = createServer(async (req, res) => {
   try {
     const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     if (typeof payload.prompt === 'string') upstreamPrompts.push(payload.prompt)
+    upstreamPayloads.push(payload)
   } catch {
     // multipart 请求无需参与 JSON 顺序断言。
   }
@@ -45,6 +47,9 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     UPSTREAM_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     UPSTREAM_API_KEY: 'test-upstream-key',
     UPSTREAM_CONCURRENCY: '1',
+    SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+    SENSENOVA_API_KEY: 'test-sensenova-key',
+    SENSENOVA_CONCURRENCY: '1',
   },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
@@ -84,11 +89,13 @@ try {
   const updatedQueueSettings = await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2 }),
+    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2 }),
   })
   if (updatedQueueSettings.payload.concurrency !== 2 || updatedQueueSettings.payload.perIpConcurrency !== 1 || updatedQueueSettings.payload.perIpQueueLimit !== 2) throw new Error('后台队列配置未生效')
   const publicQueueSettings = await request('/api/queue/status')
   if (publicQueueSettings.payload.concurrency !== 2) throw new Error('前台队列状态未同步后台配置')
+  const senseNovaQueueSettings = await request('/api/queue/status?module=sensenova-u1')
+  if (senseNovaQueueSettings.payload.concurrency !== 2) throw new Error('U1 独立队列配置不正确')
   await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
@@ -151,13 +158,23 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 1 }),
   })
+  await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-Image-Module': 'sensenova-u1' },
+    body: JSON.stringify({ model: 'wrong-model', prompt: 'U1 信息图测试', size: '2048x2048', quality: 'high', n: 1, output_format: 'png' }),
+  })
+  const senseNovaPayload = upstreamPayloads.find((item) => item.prompt === 'U1 信息图测试')
+  if (JSON.stringify(senseNovaPayload) !== JSON.stringify({ model: 'sensenova-u1-fast', prompt: 'U1 信息图测试', size: '2048x2048', n: 1, watermark: false })) throw new Error('U1 请求未按官方参数转发')
   const summary = await request('/api/admin/stats/summary?period=7d', { headers: { Cookie: cookie } })
   if (summary.payload.visits !== 1 || summary.payload.uniqueIps !== 1) throw new Error('访问统计结果不正确')
-  if (summary.payload.requests !== 1 || summary.payload.images !== 1 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
+  if (summary.payload.requests !== 2 || summary.payload.images !== 2 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
+  if (!summary.payload.modules.some((item) => item.module === 'sensenova-u1' && item.requests === 1)) throw new Error('U1 独立统计结果不正确')
   if (!Number.isFinite(summary.payload.averageDurationMs) || summary.payload.averageDurationMs < 100) throw new Error('平均完成耗时统计结果不正确')
 
   const generations = await request('/api/admin/generations', { headers: { Cookie: cookie } })
-  if (generations.payload.items[0]?.prompt !== '一只戴墨镜的橘猫' || generations.payload.items[0]?.size !== '2048x2048' || generations.payload.items[0]?.model !== 'gpt-image-2') throw new Error('提示词审计或固定模型记录不正确')
+  if (generations.payload.items[0]?.prompt !== 'U1 信息图测试' || generations.payload.items[0]?.module !== 'sensenova-u1') throw new Error('U1 提示词审计或模块记录不正确')
+  const gptGenerations = await request('/api/admin/generations?module=gpt', { headers: { Cookie: cookie } })
+  if (gptGenerations.payload.items[0]?.prompt !== '一只戴墨镜的橘猫' || gptGenerations.payload.items[0]?.model !== 'gpt-image-2') throw new Error('GPT 模块筛选结果不正确')
   const searched = await request('/api/admin/generations?q=墨镜', { headers: { Cookie: cookie } })
   if (searched.payload.items.length !== 1) throw new Error('生成记录文字搜索结果不正确')
   const future = await request('/api/admin/generations?dateFrom=2999-01-01T00:00:00.000Z', { headers: { Cookie: cookie } })

@@ -20,6 +20,7 @@ import { normalizeReasoningEffort, normalizeStreamPartialImages, parseDefaultApi
 import { readRuntimeEnv } from './runtimeEnv'
 import { isImportableConfigUrl } from './importableConfigUrl'
 import { isServerManagedApi } from './serverManagedApi'
+import { SENSENOVA_U1_MODEL, SENSENOVA_U1_PROFILE_ID } from './imageModules'
 
 const OPENAI_DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 const RAW_DEFAULT_API_URL = readRuntimeEnv(import.meta.env.VITE_DEFAULT_API_URL)
@@ -374,6 +375,25 @@ export function createDefaultOpenAIProfile(overrides: Partial<ApiProfile> = {}):
     ...overrides,
     apiMode,
     streamImages,
+  }
+}
+
+export function createSenseNovaU1Profile(overrides: Partial<ApiProfile> = {}): ApiProfile {
+  return {
+    id: SENSENOVA_U1_PROFILE_ID,
+    name: 'U1 信息图',
+    provider: 'openai',
+    baseUrl: DEFAULT_BASE_URL,
+    apiKey: '',
+    model: SENSENOVA_U1_MODEL,
+    timeout: DEFAULT_API_TIMEOUT,
+    apiMode: 'images',
+    codexCli: false,
+    apiProxy: true,
+    streamImages: false,
+    streamPartialImages: 0,
+    transparentBackgroundMethod: 'api',
+    ...overrides,
   }
 }
 

@@ -1,13 +1,18 @@
 import { useEffect, useState } from 'react'
+import { getActiveApiProfile } from '../lib/apiProfiles'
+import { getProfileImageModule } from '../lib/imageModules'
 import { fetchGenerationQueueStatus, type GenerationQueueStatus as QueueStatus } from '../lib/queueApi'
+import { useStore } from '../store'
 
 export default function GenerationQueueStatus() {
   const [status, setStatus] = useState<QueueStatus | null>(null)
+  const settings = useStore((state) => state.settings)
+  const module = getProfileImageModule(getActiveApiProfile(settings))
 
   useEffect(() => {
     let cancelled = false
     const load = () => {
-      void fetchGenerationQueueStatus()
+      void fetchGenerationQueueStatus(module)
         .then((next) => {
           if (!cancelled) setStatus(next)
         })
@@ -21,7 +26,7 @@ export default function GenerationQueueStatus() {
       cancelled = true
       window.clearInterval(timer)
     }
-  }, [])
+  }, [module])
 
   if (!status) return null
   const busy = status.active > 0 || status.waiting > 0
@@ -32,7 +37,7 @@ export default function GenerationQueueStatus() {
       title={`全站先进先出队列，并发上限 ${status.concurrency}`}
     >
       <span className={`h-1.5 w-1.5 rounded-full ${busy ? 'animate-pulse bg-amber-500' : 'bg-emerald-500'}`} />
-      {busy ? `生成中 ${status.active} · 排队 ${status.waiting}` : '生图队列空闲'}
+      {busy ? `生成中 ${status.active} · 排队 ${status.waiting}` : module === 'sensenova-u1' ? 'U1 队列空闲' : '生图队列空闲'}
     </span>
   )
 }

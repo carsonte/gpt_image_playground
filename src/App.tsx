@@ -1,7 +1,8 @@
 import { useEffect } from 'react'
 import { initStore, restoreExplicitPresetConfig, useStore } from './store'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, getExplicitUrlSettingsIds, hasUrlSettingParams } from './lib/urlSettings'
-import { createDefaultOpenAIProfile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { createDefaultOpenAIProfile, createSenseNovaU1Profile, hasDefaultPresetConfig, isAgentTextApiProfile, normalizeSettings } from './lib/apiProfiles'
+import { isServerManagedApi } from './lib/serverManagedApi'
 import { getCustomProviderConfigUrl, hasEmbeddedDefaultConfig, loadCustomProviderSettingsFromUrl, loadEmbeddedDefaultConfig } from './lib/customProviderConfigUrl'
 import { getDefaultPresetProfileId, getPresetProfileIds, isPresetConfigOnlyEnabled, setPresetConfig } from './lib/presetConfig'
 import { useDockerApiUrlMigrationNotice } from './hooks/useDockerApiUrlMigrationNotice'
@@ -71,7 +72,10 @@ export default function App() {
           : hasDefaultPresetConfig()
             ? {
                 customProviders: [],
-                profiles: [{ ...createDefaultOpenAIProfile(), isDefault: true }],
+                profiles: [
+                  { ...createDefaultOpenAIProfile(), isDefault: true },
+                  ...(isServerManagedApi() ? [createSenseNovaU1Profile()] : []),
+                ],
               }
             : null
         setPresetConfig(importedSettings)

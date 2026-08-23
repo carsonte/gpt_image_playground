@@ -2,9 +2,12 @@ import { useMemo, useRef, useState, useEffect } from 'react'
 import { useStore, reuseConfig, editOutputs, removeTask, taskMatchesFilterStatus, taskMatchesSearchQuery } from '../store'
 import { ALL_FAVORITES_COLLECTION_ID, getTaskFavoriteCollectionIds } from '../lib/favoriteState'
 import TaskCard from './TaskCard'
+import { getActiveApiProfile } from '../lib/apiProfiles'
+import { getProfileImageModule, getTaskImageModule } from '../lib/imageModules'
 
 export default function TaskGrid() {
   const tasks = useStore((s) => s.tasks)
+  const settings = useStore((s) => s.settings)
   const searchQuery = useStore((s) => s.searchQuery)
   const filterStatus = useStore((s) => s.filterStatus)
   const filterFavorite = useStore((s) => s.filterFavorite)
@@ -34,8 +37,10 @@ export default function TaskGrid() {
   const filteredTasks = useMemo(() => {
     const sorted = [...tasks].sort((a, b) => b.createdAt - a.createdAt)
     const q = searchQuery.trim().toLowerCase()
+    const imageModule = getProfileImageModule(getActiveApiProfile(settings))
     
     return sorted.filter((t) => {
+      if (getTaskImageModule(t) !== imageModule) return false
       if (filterFavorite) {
         if (!t.isFavorite) return false
         if (activeFavoriteCollectionId && activeFavoriteCollectionId !== ALL_FAVORITES_COLLECTION_ID && !getTaskFavoriteCollectionIds(t, defaultFavoriteCollectionId).includes(activeFavoriteCollectionId)) return false
@@ -43,7 +48,7 @@ export default function TaskGrid() {
       if (!taskMatchesFilterStatus(t, filterStatus)) return false
       return taskMatchesSearchQuery(t, q)
     })
-  }, [tasks, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
+  }, [tasks, settings, searchQuery, filterStatus, filterFavorite, activeFavoriteCollectionId, defaultFavoriteCollectionId])
 
   const handleDelete = (task: typeof tasks[0]) => {
     setConfirmDialog({

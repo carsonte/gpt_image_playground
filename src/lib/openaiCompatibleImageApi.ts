@@ -25,6 +25,7 @@ import {
 import { isEventStreamResponse, readJsonServerSentEvents } from './serverSentEvents'
 import { isServerManagedApi } from './serverManagedApi'
 import { prependCodexCliSizePrompt } from './size'
+import { getProfileImageModule } from './imageModules'
 
 function getStreamPartialImages(profile: ApiProfile): number {
   return profile.streamPartialImages ?? DEFAULT_STREAM_PARTIAL_IMAGES
@@ -87,7 +88,10 @@ function normalizeImageApiPayload(value: unknown): ImageApiResponse {
 }
 
 function createRequestHeaders(profile: ApiProfile): Record<string, string> {
-  return profile.apiKey.trim() ? { Authorization: `Bearer ${profile.apiKey}` } : {}
+  return {
+    ...(profile.apiKey.trim() ? { Authorization: `Bearer ${profile.apiKey}` } : {}),
+    'X-Image-Module': getProfileImageModule(profile),
+  }
 }
 
 function encodeAuditHeader(value: string) {

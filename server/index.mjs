@@ -23,7 +23,14 @@ const loginFailures = new Map()
 const proxyQueue = []
 const activeProxyItems = new Map()
 let activeProxyRequests = 0
+const senseNovaQueue = []
+const activeSenseNovaItems = new Map()
+let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
+const senseNovaSizes = new Set([
+  '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
+  '1760x2368', '2272x1824', '1824x2272', '3072x1376', '1344x3136',
+])
 
 function readAppSetting(key, fallback) {
   return db.prepare('SELECT value FROM app_settings WHERE key = ?').get(key)?.value ?? fallback
@@ -48,6 +55,18 @@ const savedPerIpQueueLimit = Number.parseInt(readAppSetting('per_ip_queue_limit'
 let perIpQueueLimit = Number.isFinite(savedPerIpQueueLimit)
   ? Math.max(0, Math.min(100, savedPerIpQueueLimit))
   : 3
+const savedSenseNovaConcurrency = Number.parseInt(readAppSetting('sensenova_concurrency', ''), 10)
+let senseNovaConcurrency = Number.isFinite(savedSenseNovaConcurrency)
+  ? Math.max(1, Math.min(20, savedSenseNovaConcurrency))
+  : config.senseNovaConcurrency
+const savedSenseNovaPerIpConcurrency = Number.parseInt(readAppSetting('sensenova_per_ip_concurrency', ''), 10)
+let senseNovaPerIpConcurrency = Number.isFinite(savedSenseNovaPerIpConcurrency)
+  ? Math.max(1, Math.min(20, savedSenseNovaPerIpConcurrency))
+  : 1
+const savedSenseNovaPerIpQueueLimit = Number.parseInt(readAppSetting('sensenova_per_ip_queue_limit', ''), 10)
+let senseNovaPerIpQueueLimit = Number.isFinite(savedSenseNovaPerIpQueueLimit)
+  ? Math.max(0, Math.min(100, savedSenseNovaPerIpQueueLimit))
+  : 2
 let privacyNoticeEnabled = readAppSetting('privacy_notice_enabled', 'true') === 'true'
 let privacyNoticeText = readAppSetting('privacy_notice_text', defaultPrivacyNotice)
 let queueStatusEnabled = readAppSetting('queue_status_enabled', 'true') === 'true'
@@ -151,6 +170,58 @@ function acquireProxySlot(req, metadata) {
     req.once('aborted', item.onAborted)
     proxyQueue.push(item)
     runProxyQueue()
+  })
+}
+
+function runSenseNovaQueue() {
+  while (activeSenseNovaRequests < senseNovaConcurrency && senseNovaQueue.length) {
+    const activeByIp = new Map()
+    for (const item of activeSenseNovaItems.values()) {
+      activeByIp.set(item.ipAddress, (activeByIp.get(item.ipAddress) ?? 0) + 1)
+    }
+    const idx = senseNovaQueue.findIndex((item) => (activeByIp.get(item.metadata.ipAddress) ?? 0) < senseNovaPerIpConcurrency)
+    if (idx < 0) return
+    const [item] = senseNovaQueue.splice(idx, 1)
+    if (item.req.aborted) {
+      item.resolve(null)
+      continue
+    }
+    activeSenseNovaRequests += 1
+    item.req.off('aborted', item.onAborted)
+    const startedAt = Date.now()
+    activeSenseNovaItems.set(item.metadata.requestId, { ...item.metadata, queuedAt: item.queuedAt, startedAt })
+    let released = false
+    item.resolve({
+      waitedMs: Date.now() - item.queuedAt,
+      release: () => {
+        if (released) return
+        released = true
+        activeSenseNovaItems.delete(item.metadata.requestId)
+        activeSenseNovaRequests = Math.max(0, activeSenseNovaRequests - 1)
+        runSenseNovaQueue()
+      },
+    })
+  }
+}
+
+function acquireSenseNovaSlot(req, metadata) {
+  return new Promise((resolveSlot) => {
+    const item = {
+      req,
+      queuedAt: Date.now(),
+      metadata,
+      resolve: resolveSlot,
+      onAborted: null,
+    }
+    item.onAborted = () => {
+      const idx = senseNovaQueue.indexOf(item)
+      if (idx < 0) return
+      senseNovaQueue.splice(idx, 1)
+      resolveSlot(null)
+    }
+    req.once('aborted', item.onAborted)
+    senseNovaQueue.push(item)
+    runSenseNovaQueue()
   })
 }
 
@@ -301,6 +372,133 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   })
 }
 
+app.post('/api-proxy/*path', async (req, res, next) => {
+  if (req.headers['x-image-module'] !== 'sensenova-u1') return next()
+
+  const requestId = randomUUID()
+  const startedAt = Date.now()
+  const ipAddress = getClientIp(req)
+  const ipHash = hashIp(ipAddress)
+  const endpoint = `/${Array.isArray(req.params.path) ? req.params.path.join('/') : req.params.path}`
+  if (getActiveBlock(ipAddress)) {
+    addLog({ requestId, level: 'warn', type: 'security', event: 'ip.blocked_request', ipHash, status: 'rejected', details: { endpoint, module: 'sensenova-u1' } })
+    return res.status(403).json({ error: '当前 IP 已被禁止使用生图服务', requestId })
+  }
+  if (endpoint !== '/images/generations') {
+    return res.status(404).json({ error: 'U1 信息图当前仅支持文字生成', requestId })
+  }
+  if (!String(req.headers['content-type'] ?? '').toLowerCase().startsWith('application/json')) {
+    return res.status(415).json({ error: 'U1 信息图请求格式不受支持', requestId })
+  }
+  if (!config.senseNovaApiKey) {
+    return res.status(503).json({ error: '服务器尚未配置 SenseNova API Key', requestId })
+  }
+
+  let payload
+  try {
+    payload = JSON.parse((await readBody(req)).toString('utf8'))
+  } catch (error) {
+    return res.status(400).json({ error: sanitizeError(error.message), requestId })
+  }
+  const prompt = String(payload.prompt ?? readPromptAudit(req)).trim().slice(0, 5000)
+  const size = String(payload.size ?? '2048x2048')
+  if (!prompt) return res.status(400).json({ error: '请输入信息图描述', requestId })
+  if (!senseNovaSizes.has(size)) return res.status(400).json({ error: '当前尺寸不受 U1 信息图支持', requestId })
+  if (Number.parseInt(payload.n ?? 1, 10) !== 1) {
+    return res.status(400).json({ error: 'U1 信息图每次只能生成 1 张图片', requestId })
+  }
+
+  const activeForIp = [...activeSenseNovaItems.values()].filter((item) => item.ipAddress === ipAddress).length
+  const waitingForIp = senseNovaQueue.filter((item) => item.metadata.ipAddress === ipAddress).length
+  if (activeForIp + waitingForIp >= senseNovaPerIpConcurrency + senseNovaPerIpQueueLimit) {
+    res.setHeader('Retry-After', '10')
+    addLog({ requestId, level: 'warn', type: 'security', event: 'ip.queue_limited', ipHash, status: 'rejected', details: { endpoint, module: 'sensenova-u1' } })
+    return res.status(429).json({ error: `当前 IP 的 U1 任务过多，最多同时生成 ${senseNovaPerIpConcurrency} 个、排队 ${senseNovaPerIpQueueLimit} 个，请稍后再试`, requestId })
+  }
+  const willQueue = activeSenseNovaRequests >= senseNovaConcurrency || activeForIp >= senseNovaPerIpConcurrency
+  if (willQueue) {
+    addLog({ requestId, type: 'request', event: 'image.queued', ipHash, status: 'queued', details: { endpoint, module: 'sensenova-u1', position: senseNovaQueue.length + 1 } })
+  }
+  const slot = await acquireSenseNovaSlot(req, { requestId, ipAddress, endpoint, action: 'generate', prompt, size, imageCount: 1 })
+  if (!slot) return
+
+  db.prepare(`
+    INSERT INTO generation_events (
+      request_id, ip_hash, ip_address, endpoint, module, action, model, prompt, size,
+      resolution_tier, quality, image_count, status, created_at
+    ) VALUES (?, ?, ?, ?, 'sensenova-u1', 'generate', ?, ?, ?, ?, '', 1, 'started', ?)
+  `).run(requestId, ipHash, ipAddress, endpoint, config.senseNovaModel, prompt, size, getResolutionTier(size), now())
+
+  try {
+    const response = await fetch(`${config.senseNovaApiUrl}/images/generations`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${config.senseNovaApiKey}`,
+        Accept: 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ model: config.senseNovaModel, prompt, size, n: 1, watermark: false }),
+      signal: AbortSignal.timeout(600_000),
+    })
+    let body = Buffer.from(await response.arrayBuffer())
+    if (response.ok && String(response.headers.get('content-type') ?? '').includes('application/json')) {
+      try {
+        const payload = JSON.parse(body.toString('utf8'))
+        if (Array.isArray(payload.data)) {
+          for (const item of payload.data) {
+            if (typeof item?.url !== 'string' || item.b64_json) continue
+            const imageUrl = new URL(item.url)
+            if (imageUrl.protocol !== 'https:') continue
+            const imageResponse = await fetch(imageUrl, { signal: AbortSignal.timeout(120_000) })
+            const contentLength = Number.parseInt(imageResponse.headers.get('content-length') ?? '0', 10)
+            if (!imageResponse.ok || contentLength > 25 * 1024 * 1024) continue
+            const image = Buffer.from(await imageResponse.arrayBuffer())
+            if (image.length > 25 * 1024 * 1024) continue
+            item.b64_json = image.toString('base64')
+            delete item.url
+          }
+          body = Buffer.from(JSON.stringify(payload))
+        }
+      } catch (error) {
+        addLog({ requestId, level: 'warn', type: 'system', event: 'sensenova.image_normalize_failed', ipHash, status: 'fallback', details: { message: sanitizeError(error.message) } })
+      }
+    }
+    const durationMs = Date.now() - startedAt
+    const status = response.ok ? 'success' : 'failed'
+    db.prepare(`
+      UPDATE generation_events
+      SET status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
+      WHERE request_id = ?
+    `).run(status, response.status, durationMs, response.ok ? '' : sanitizeError(body.toString('utf8')), now(), requestId)
+    addLog({
+      requestId,
+      level: response.ok ? 'info' : 'warn',
+      type: 'request',
+      event: 'image.proxy',
+      ipHash,
+      status,
+      durationMs,
+      details: { endpoint, module: 'sensenova-u1', model: config.senseNovaModel, imageCount: 1, upstreamStatus: response.status, queueWaitMs: slot.waitedMs },
+    })
+    res.status(response.status)
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json')
+    res.setHeader('X-Request-Id', requestId)
+    res.end(body)
+  } catch (error) {
+    const durationMs = Date.now() - startedAt
+    const message = sanitizeError(error.message)
+    db.prepare(`
+      UPDATE generation_events
+      SET status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
+      WHERE request_id = ?
+    `).run(durationMs, message, now(), requestId)
+    addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, module: 'sensenova-u1', model: config.senseNovaModel, message } })
+    res.status(502).json({ error: 'SenseNova 图片服务请求失败', requestId })
+  } finally {
+    slot.release()
+  }
+})
+
 app.post('/api-proxy/*path', async (req, res) => {
   const requestId = randomUUID()
   const startedAt = Date.now()
@@ -373,9 +571,9 @@ app.post('/api-proxy/*path', async (req, res) => {
 
     db.prepare(`
       INSERT INTO generation_events (
-        request_id, ip_hash, ip_address, endpoint, action, model, prompt, size,
+        request_id, ip_hash, ip_address, endpoint, module, action, model, prompt, size,
         resolution_tier, quality, image_count, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)
+      ) VALUES (?, ?, ?, ?, 'gpt', ?, ?, ?, ?, ?, ?, ?, 'started', ?)
     `).run(requestId, ipHash, ipAddress, endpoint, action, model, prompt, size, getResolutionTier(size), quality, imageCount, now())
 
     try {
@@ -436,11 +634,22 @@ app.post('/api-proxy/*path', async (req, res) => {
 app.use(express.json({ limit: '1mb' }))
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, upstreamConfigured: Boolean(config.upstreamApiKey) })
+  res.json({
+    ok: true,
+    upstreamConfigured: Boolean(config.upstreamApiKey),
+    senseNovaConfigured: Boolean(config.senseNovaApiKey),
+  })
 })
 
-app.get('/api/queue/status', (_req, res) => {
+app.get('/api/queue/status', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
+  if (req.query.module === 'sensenova-u1') {
+    return res.json({
+      active: activeSenseNovaRequests,
+      waiting: senseNovaQueue.length,
+      concurrency: senseNovaConcurrency,
+    })
+  }
   res.json({
     active: activeProxyRequests,
     waiting: proxyQueue.length,
@@ -526,7 +735,19 @@ app.post('/api/admin/logout', (req, res) => {
 })
 
 app.get('/api/admin/settings/queue', (_req, res) => {
-  res.json({ concurrency: upstreamConcurrency, perIpConcurrency, perIpQueueLimit, active: activeProxyRequests, waiting: proxyQueue.length })
+  res.json({
+    concurrency: upstreamConcurrency,
+    perIpConcurrency,
+    perIpQueueLimit,
+    active: activeProxyRequests,
+    waiting: proxyQueue.length,
+    senseNovaConcurrency,
+    senseNovaPerIpConcurrency,
+    senseNovaPerIpQueueLimit,
+    senseNovaActive: activeSenseNovaRequests,
+    senseNovaWaiting: senseNovaQueue.length,
+    senseNovaConfigured: Boolean(config.senseNovaApiKey),
+  })
 })
 
 app.get('/api/admin/queue/tasks', (_req, res) => {
@@ -536,8 +757,12 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
     concurrency: upstreamConcurrency,
     perIpConcurrency,
     perIpQueueLimit,
-    active: [...activeProxyItems.values()].map((item) => ({
+    active: [
+      ...[...activeProxyItems.values()].map((item) => ({ ...item, module: 'gpt' })),
+      ...[...activeSenseNovaItems.values()].map((item) => ({ ...item, module: 'sensenova-u1' })),
+    ].map((item) => ({
       requestId: item.requestId,
+      module: item.module,
       ipAddress: item.ipAddress,
       action: item.action,
       endpoint: item.endpoint,
@@ -549,8 +774,12 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
       waitMs: item.startedAt - item.queuedAt,
       runtimeMs: current - item.startedAt,
     })),
-    waiting: proxyQueue.map((item, idx) => ({
+    waiting: [
+      ...proxyQueue.map((item, idx) => ({ ...item, module: 'gpt', position: idx + 1 })),
+      ...senseNovaQueue.map((item, idx) => ({ ...item, module: 'sensenova-u1', position: idx + 1 })),
+    ].map((item) => ({
       requestId: item.metadata.requestId,
+      module: item.module,
       ipAddress: item.metadata.ipAddress,
       action: item.metadata.action,
       endpoint: item.metadata.endpoint,
@@ -558,7 +787,7 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
       size: item.metadata.size,
       imageCount: item.metadata.imageCount,
       queuedAt: new Date(item.queuedAt).toISOString(),
-      position: idx + 1,
+      position: item.position,
       waitMs: current - item.queuedAt,
     })),
   })
@@ -568,6 +797,9 @@ app.put('/api/admin/settings/queue', (req, res) => {
   const concurrency = Number.parseInt(req.body.concurrency, 10)
   const nextPerIpConcurrency = Number.parseInt(req.body.perIpConcurrency, 10)
   const nextPerIpQueueLimit = Number.parseInt(req.body.perIpQueueLimit, 10)
+  const nextSenseNovaConcurrency = Number.parseInt(req.body.senseNovaConcurrency ?? senseNovaConcurrency, 10)
+  const nextSenseNovaPerIpConcurrency = Number.parseInt(req.body.senseNovaPerIpConcurrency ?? senseNovaPerIpConcurrency, 10)
+  const nextSenseNovaPerIpQueueLimit = Number.parseInt(req.body.senseNovaPerIpQueueLimit ?? senseNovaPerIpQueueLimit, 10)
   if (!Number.isFinite(concurrency) || concurrency < 1 || concurrency > 20) {
     return res.status(400).json({ error: '并发数量必须是 1–20 的整数' })
   }
@@ -577,18 +809,46 @@ app.put('/api/admin/settings/queue', (req, res) => {
   if (!Number.isFinite(nextPerIpQueueLimit) || nextPerIpQueueLimit < 0 || nextPerIpQueueLimit > 100) {
     return res.status(400).json({ error: '单 IP 排队上限必须是 0–100 的整数' })
   }
+  if (!Number.isFinite(nextSenseNovaConcurrency) || nextSenseNovaConcurrency < 1 || nextSenseNovaConcurrency > 20) {
+    return res.status(400).json({ error: 'U1 并发数量必须是 1–20 的整数' })
+  }
+  if (!Number.isFinite(nextSenseNovaPerIpConcurrency) || nextSenseNovaPerIpConcurrency < 1 || nextSenseNovaPerIpConcurrency > 20) {
+    return res.status(400).json({ error: 'U1 单 IP 并发必须是 1–20 的整数' })
+  }
+  if (!Number.isFinite(nextSenseNovaPerIpQueueLimit) || nextSenseNovaPerIpQueueLimit < 0 || nextSenseNovaPerIpQueueLimit > 100) {
+    return res.status(400).json({ error: 'U1 单 IP 排队上限必须是 0–100 的整数' })
+  }
   upstreamConcurrency = concurrency
   perIpConcurrency = nextPerIpConcurrency
   perIpQueueLimit = nextPerIpQueueLimit
+  senseNovaConcurrency = nextSenseNovaConcurrency
+  senseNovaPerIpConcurrency = nextSenseNovaPerIpConcurrency
+  senseNovaPerIpQueueLimit = nextSenseNovaPerIpQueueLimit
   const saveQueueSettings = db.transaction(() => {
     saveAppSetting('upstream_concurrency', concurrency)
     saveAppSetting('per_ip_concurrency', perIpConcurrency)
     saveAppSetting('per_ip_queue_limit', perIpQueueLimit)
+    saveAppSetting('sensenova_concurrency', senseNovaConcurrency)
+    saveAppSetting('sensenova_per_ip_concurrency', senseNovaPerIpConcurrency)
+    saveAppSetting('sensenova_per_ip_queue_limit', senseNovaPerIpQueueLimit)
   })
   saveQueueSettings()
   runProxyQueue()
-  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit } })
-  res.json({ concurrency: upstreamConcurrency, perIpConcurrency, perIpQueueLimit, active: activeProxyRequests, waiting: proxyQueue.length })
+  runSenseNovaQueue()
+  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit, senseNovaConcurrency, senseNovaPerIpConcurrency, senseNovaPerIpQueueLimit } })
+  res.json({
+    concurrency: upstreamConcurrency,
+    perIpConcurrency,
+    perIpQueueLimit,
+    active: activeProxyRequests,
+    waiting: proxyQueue.length,
+    senseNovaConcurrency,
+    senseNovaPerIpConcurrency,
+    senseNovaPerIpQueueLimit,
+    senseNovaActive: activeSenseNovaRequests,
+    senseNovaWaiting: senseNovaQueue.length,
+    senseNovaConfigured: Boolean(config.senseNovaApiKey),
+  })
 })
 
 app.get('/api/admin/settings/site', (_req, res) => {
@@ -720,6 +980,13 @@ app.get('/api/admin/stats/summary', (req, res) => {
     FROM generation_events WHERE created_at >= ?
     GROUP BY resolution_tier ORDER BY requests DESC
   `).all(start)
+  const modules = db.prepare(`
+    SELECT module, COUNT(*) AS requests,
+      COALESCE(SUM(CASE WHEN status = 'success' THEN image_count ELSE 0 END), 0) AS images,
+      ROUND(AVG(CASE WHEN status = 'success' THEN duration_ms END)) AS average_duration_ms
+    FROM generation_events WHERE created_at >= ?
+    GROUP BY module ORDER BY requests DESC
+  `).all(start)
   res.json({
     visits: visits.count,
     uniqueIps: visits.unique_ips,
@@ -729,6 +996,12 @@ app.get('/api/admin/stats/summary', (req, res) => {
     failed: generations.failed,
     averageDurationMs: generations.average_duration_ms,
     resolutions,
+    modules: modules.map((item) => ({
+      module: item.module,
+      requests: item.requests,
+      images: item.images,
+      averageDurationMs: item.average_duration_ms,
+    })),
   })
 })
 
@@ -775,6 +1048,12 @@ app.get('/api/admin/generations', (req, res) => {
   const query = String(req.query.q ?? '').trim().slice(0, 200)
   const dateFrom = String(req.query.dateFrom ?? '').trim()
   const dateTo = String(req.query.dateTo ?? '').trim()
+  const module = String(req.query.module ?? '').trim()
+  if (module && !['gpt', 'sensenova-u1'].includes(module)) return res.status(400).json({ error: '生图模块无效' })
+  if (module) {
+    conditions.push('module = ?')
+    params.push(module)
+  }
   if (ipAddress) {
     conditions.push('ip_address = ?')
     params.push(normalizeIp(ipAddress))
@@ -802,6 +1081,7 @@ app.get('/api/admin/generations', (req, res) => {
       id: row.id,
       requestId: row.request_id,
       ipAddress: row.ip_address,
+      module: row.module,
       action: row.action,
       endpoint: row.endpoint,
       model: row.model,

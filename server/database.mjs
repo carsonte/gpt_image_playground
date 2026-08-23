@@ -64,6 +64,7 @@ db.exec(`
     ip_hash TEXT NOT NULL,
     ip_address TEXT NOT NULL DEFAULT '',
     endpoint TEXT NOT NULL,
+    module TEXT NOT NULL DEFAULT 'gpt',
     action TEXT NOT NULL DEFAULT 'generate',
     model TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL DEFAULT '',
@@ -118,6 +119,7 @@ function ensureColumn(table, column, definition) {
 
 ensureColumn('visit_sessions', 'ip_address', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'ip_address', "TEXT NOT NULL DEFAULT ''")
+ensureColumn('generation_events', 'module', "TEXT NOT NULL DEFAULT 'gpt'")
 ensureColumn('generation_events', 'action', "TEXT NOT NULL DEFAULT 'generate'")
 ensureColumn('generation_events', 'prompt', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'size', "TEXT NOT NULL DEFAULT ''")
