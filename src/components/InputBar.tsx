@@ -1814,7 +1814,6 @@ export default function InputBar() {
                   onClick={() => void optimizePrompt()}
                   disabled={!prompt.trim() || optimizingPrompt}
                   className="flex items-center gap-1.5 rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40 dark:text-violet-300"
-                  title="提示词将发送至小红书 AI 进行优化"
                 >
                   {optimizingPrompt ? (
                     <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
