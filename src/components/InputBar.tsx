@@ -453,7 +453,7 @@ export default function InputBar() {
       const response = await fetch('/api/prompt/optimize', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt: sourcePrompt, module: 'sensenova-u1' }),
+        body: JSON.stringify({ prompt: sourcePrompt, module: 'sensenova-u1', size: params.size }),
       })
       const payload = await response.json() as { prompt?: unknown; error?: unknown }
       if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : '提示词优化失败')
@@ -468,7 +468,7 @@ export default function InputBar() {
     } finally {
       setOptimizingPrompt(false)
     }
-  }, [optimizingPrompt, prompt, setPrompt, showToast])
+  }, [optimizingPrompt, params.size, prompt, setPrompt, showToast])
   const submitCurrentMode = useCallback(() => {
     if (appMode === 'agent') {
       void submitAgentMessage()
@@ -1814,14 +1814,14 @@ export default function InputBar() {
                   onClick={() => void optimizePrompt()}
                   disabled={!prompt.trim() || optimizingPrompt}
                   className="flex items-center gap-1.5 rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40 dark:text-violet-300"
-                  title="提示词将发送至 Dots.ai 进行优化"
+                  title="提示词将发送至小红书 AI 进行优化"
                 >
                   {optimizingPrompt ? (
                     <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
                   ) : (
                     <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4m5-2 1.2 3.6L17 8l-3.8 1.4L12 13l-1.2-3.6L7 8l3.8-1.4L12 3zm6 10 .9 2.6L22 17l-3.1 1.4L18 21l-.9-2.6L14 17l3.1-1.4L18 13z" /></svg>
                   )}
-                  {optimizingPrompt ? '正在优化…' : '优化提示词'}
+                  {optimizingPrompt ? '正在优化…' : '优化提示词（实验室功能 · 推荐）'}
                 </button>
                 {promptOptimization && prompt === promptOptimization.after && !optimizingPrompt && (
                   <button
@@ -1838,7 +1838,7 @@ export default function InputBar() {
                   </button>
                 )}
               </div>
-              <span className="hidden text-[11px] text-gray-400 sm:block">由 Dots.ai 优化，仅用于 U1 信息图</span>
+              <span className="hidden text-[11px] text-gray-400 sm:block">由小红书 AI 优化，仅用于 U1 信息图</span>
             </div>
           )}
 

@@ -641,6 +641,7 @@ app.post('/api/prompt/optimize', async (req, res) => {
   const ipHash = hashIp(ipAddress)
   const prompt = typeof req.body.prompt === 'string' ? req.body.prompt.trim() : ''
   const module = req.body.module === 'sensenova-u1' ? 'sensenova-u1' : ''
+  const size = senseNovaSizes.has(req.body.size) ? req.body.size : '2048x2048'
 
   if (getActiveBlock(ipAddress)) return res.status(403).json({ error: '当前 IP 已被限制访问' })
   if (module !== 'sensenova-u1') return res.status(400).json({ error: '提示词优化目前仅支持 U1 信息图' })
@@ -658,6 +659,9 @@ app.post('/api/prompt/optimize', async (req, res) => {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 45_000)
   try {
+    const optimizationMode = prompt.length >= 500
+      ? '用户输入已经比较详细，只整理信息层级和视觉表达，不继续扩写内容。'
+      : '用户输入较简略，可以补充必要的版式、视觉层级和风格描述。'
     const response = await fetch(`${config.dotsApiUrl}/v1/chat/completions`, {
       method: 'POST',
       headers: {
@@ -669,9 +673,18 @@ app.post('/api/prompt/optimize', async (req, res) => {
         messages: [
           {
             role: 'system',
-            content: '你是专业的信息图生成提示词优化器。把用户输入改写成适合生成信息图、海报或知识卡片的中文提示词，补充清晰的信息层级、版式区域、标题与正文关系、配色、图标风格和文字可读性。保留用户原意、专有名词、所有 @图片引用、指定文字和明确约束，不捏造事实或添加用户没有要求的文案。输出完整可直接用于 U1 信息图模型的优化提示词，不要解释，不要使用 Markdown 标题或代码块。',
+            content: `你是专业的信息图生成提示词优化器。把用户输入整理成可直接用于 U1 信息图模型的提示词，并适配指定画布尺寸。${optimizationMode}
+
+必须遵守以下规则：
+1. 用户提供的数字、日期、时间、百分比、价格、单位、排名、产品名、专有名词、网址和 @图片引用均为只读数据，必须原样保留，不得修改、遗漏或虚构。
+2. 引号中的标题、正文、口号和其他指定文案必须逐字保留，不得翻译或改写。
+3. 不新增用户未提供的事实、数据、结论或宣传承诺；数据存在矛盾时也不得自行修正。
+4. 保持用户原本的语言；中英混合内容保留原样。
+5. 只优化信息层级、版式区域、标题与正文关系、配色、图标风格、留白和文字可读性。
+6. 输出前自行核对所有只读数据与原文一致。
+7. 只输出一份完整提示词，不要解释，不要使用 Markdown 标题或代码块。`,
           },
-          { role: 'user', content: prompt },
+          { role: 'user', content: `画布尺寸：${size}\n\n用户原始提示词：\n${prompt}` },
         ],
         stream: false,
         max_tokens: 1200,
@@ -688,6 +701,16 @@ app.post('/api/prompt/optimize', async (req, res) => {
       ? payload.choices[0].message.content.trim().replace(/^```(?:text)?\s*/, '').replace(/\s*```$/, '')
       : ''
     if (!optimizedPrompt) throw new Error('Dots API 未返回优化结果')
+    if (optimizedPrompt.length > 12_000) throw new Error('优化结果过长，请缩短原提示词后重试')
+    const protectedTokens = [
+      ...(prompt.match(/https?:\/\/[^\s]+/gi) ?? []),
+      ...(prompt.match(/\d+(?:[.,]\d+)*(?:\s*(?:%|％|元|万元|万|亿|kg|g|mg|ml|L|°C|℃|年|月|日|时|分|秒))?/gi) ?? []),
+      ...Array.from(prompt.matchAll(/[“"]([^”"]+)[”"]/g), (match) => match[1]),
+      ...Array.from(prompt.matchAll(/[‘']([^’']+)[’']/g), (match) => match[1]),
+    ]
+    if (protectedTokens.some((token) => !optimizedPrompt.includes(token))) {
+      throw new Error('优化结果未完整保留原始数据或指定文案，请调整原提示词后重试')
+    }
 
     addLog({ requestId, type: 'request', event: 'prompt.optimize', ipHash, status: 'success', durationMs: Date.now() - startedAt, details: { module, inputLength: prompt.length, outputLength: optimizedPrompt.length } })
     res.setHeader('Cache-Control', 'no-store')

@@ -30,7 +30,7 @@ const upstream = createServer(async (req, res) => {
   await new Promise((resolve) => setTimeout(resolve, 120))
   res.writeHead(200, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(req.url === '/v1/chat/completions'
-    ? { choices: [{ message: { content: '优化后的 U1 信息图提示词' } }] }
+    ? { choices: [{ message: { content: '优化后的 U1 信息图提示词，完整保留价格“19.9 元”' } }] }
     : { data: [] }))
   upstreamActive -= 1
 })
@@ -119,11 +119,12 @@ try {
   const optimizedPrompt = await request('/api/prompt/optimize', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: '做一张咖啡知识卡片', module: 'sensenova-u1' }),
+    body: JSON.stringify({ prompt: '做一张咖啡知识卡片，价格“19.9 元”', module: 'sensenova-u1', size: '2496x1664' }),
   })
-  if (optimizedPrompt.payload.prompt !== '优化后的 U1 信息图提示词') throw new Error('U1 提示词优化结果不正确')
+  if (!optimizedPrompt.payload.prompt.includes('19.9 元')) throw new Error('U1 提示词优化未保留原始数据')
   const dotsPayload = upstreamPayloads.find((item) => item.model === 'dots3-note-prev')
   if (dotsPayload?.chat_template_kwargs?.enable_thinking !== false || dotsPayload?.stream !== false) throw new Error('Dots 提示词优化参数不正确')
+  if (!dotsPayload.messages?.[0]?.content.includes('只读数据') || !dotsPayload.messages?.[1]?.content.includes('2496x1664')) throw new Error('Dots 数据保护或画布尺寸提示缺失')
   const rejectedGptOptimization = await fetch(`${origin}/api/prompt/optimize`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
