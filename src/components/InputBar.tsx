@@ -328,6 +328,8 @@ export default function InputBar() {
   const [expandPromptHover, setExpandPromptHover] = useState(false)
   const [submitHover, setSubmitHover] = useState(false)
   const [attachHover, setAttachHover] = useState(false)
+  const [optimizingPrompt, setOptimizingPrompt] = useState(false)
+  const [promptOptimization, setPromptOptimization] = useState<{ before: string; after: string } | null>(null)
   const [imageHintId, setImageHintId] = useState<string | null>(null)
   const [mobileCollapsed, setMobileCollapsed] = useState(false)
   const [showSizePicker, setShowSizePicker] = useState(false)
@@ -443,6 +445,30 @@ export default function InputBar() {
   const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
   const senseNovaU1 = getProfileImageModule(activeProfile) === 'sensenova-u1'
   const promptPlaceholder = senseNovaU1 ? '描述你想制作的信息图、海报或知识卡片...' : '描述你想生成的图片，可输入 @ 来指定参考图...'
+  const optimizePrompt = useCallback(async () => {
+    const sourcePrompt = prompt.trim()
+    if (!sourcePrompt || optimizingPrompt) return
+    setOptimizingPrompt(true)
+    try {
+      const response = await fetch('/api/prompt/optimize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: sourcePrompt, module: 'sensenova-u1' }),
+      })
+      const payload = await response.json() as { prompt?: unknown; error?: unknown }
+      if (!response.ok) throw new Error(typeof payload.error === 'string' ? payload.error : '提示词优化失败')
+      if (typeof payload.prompt !== 'string' || !payload.prompt.trim()) throw new Error('提示词优化服务未返回有效内容')
+      const optimizedPrompt = payload.prompt.trim()
+      setPromptOptimization({ before: prompt, after: optimizedPrompt })
+      isUserInputRef.current = false
+      setPrompt(optimizedPrompt)
+      showToast('提示词已优化，可随时撤销', 'success')
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : '提示词优化失败', 'error')
+    } finally {
+      setOptimizingPrompt(false)
+    }
+  }, [optimizingPrompt, prompt, setPrompt, showToast])
   const submitCurrentMode = useCallback(() => {
     if (appMode === 'agent') {
       void submitAgentMessage()
@@ -1779,6 +1805,42 @@ export default function InputBar() {
               </div>
             )}
           </div>
+
+          {senseNovaU1 && (
+            <div className="mt-2 flex items-center justify-between gap-3 px-1">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void optimizePrompt()}
+                  disabled={!prompt.trim() || optimizingPrompt}
+                  className="flex items-center gap-1.5 rounded-lg bg-violet-500/10 px-2.5 py-1.5 text-xs font-medium text-violet-700 transition hover:bg-violet-500/15 disabled:cursor-not-allowed disabled:opacity-40 dark:text-violet-300"
+                  title="提示词将发送至 Dots.ai 进行优化"
+                >
+                  {optimizingPrompt ? (
+                    <span className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-violet-400 border-t-transparent" />
+                  ) : (
+                    <svg className="h-3.5 w-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4m5-2 1.2 3.6L17 8l-3.8 1.4L12 13l-1.2-3.6L7 8l3.8-1.4L12 3zm6 10 .9 2.6L22 17l-3.1 1.4L18 21l-.9-2.6L14 17l3.1-1.4L18 13z" /></svg>
+                  )}
+                  {optimizingPrompt ? '正在优化…' : '优化提示词'}
+                </button>
+                {promptOptimization && prompt === promptOptimization.after && !optimizingPrompt && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      isUserInputRef.current = false
+                      setPrompt(promptOptimization.before)
+                      setPromptOptimization(null)
+                      showToast('已恢复原始提示词', 'info')
+                    }}
+                    className="rounded-lg px-2 py-1.5 text-xs text-gray-500 transition hover:bg-gray-100 hover:text-gray-700 dark:hover:bg-white/[0.06] dark:hover:text-gray-300"
+                  >
+                    撤销优化
+                  </button>
+                )}
+              </div>
+              <span className="hidden text-[11px] text-gray-400 sm:block">由 Dots.ai 优化，仅用于 U1 信息图</span>
+            </div>
+          )}
 
           {/* 参数 + 按钮 */}
           <div className="mt-3">

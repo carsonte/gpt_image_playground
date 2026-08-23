@@ -29,7 +29,9 @@ const upstream = createServer(async (req, res) => {
   maxUpstreamActive = Math.max(maxUpstreamActive, upstreamActive)
   await new Promise((resolve) => setTimeout(resolve, 120))
   res.writeHead(200, { 'Content-Type': 'application/json' })
-  res.end(JSON.stringify({ data: [] }))
+  res.end(JSON.stringify(req.url === '/v1/chat/completions'
+    ? { choices: [{ message: { content: '优化后的 U1 信息图提示词' } }] }
+    : { data: [] }))
   upstreamActive -= 1
 })
 await new Promise((resolve) => upstream.listen(upstreamPort, '127.0.0.1', resolve))
@@ -50,6 +52,8 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     SENSENOVA_API_KEY: 'test-sensenova-key',
     SENSENOVA_CONCURRENCY: '1',
+    DOTS_API_URL: `http://127.0.0.1:${upstreamPort}`,
+    DOTS_API_KEY: 'test-dots-key',
   },
   stdio: ['ignore', 'pipe', 'inherit'],
 })
@@ -111,6 +115,21 @@ try {
   if (updatedSiteSettings.payload.privacyNoticeText !== '测试本地提示文字' || updatedSiteSettings.payload.queueStatusEnabled) throw new Error('后台首页提示配置未生效')
   const publicSiteSettings = await request('/api/site-config')
   if (publicSiteSettings.payload.privacyNoticeText !== '测试本地提示文字' || publicSiteSettings.payload.queueStatusEnabled) throw new Error('前台首页提示配置未同步')
+
+  const optimizedPrompt = await request('/api/prompt/optimize', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '做一张咖啡知识卡片', module: 'sensenova-u1' }),
+  })
+  if (optimizedPrompt.payload.prompt !== '优化后的 U1 信息图提示词') throw new Error('U1 提示词优化结果不正确')
+  const dotsPayload = upstreamPayloads.find((item) => item.model === 'dots3-note-prev')
+  if (dotsPayload?.chat_template_kwargs?.enable_thinking !== false || dotsPayload?.stream !== false) throw new Error('Dots 提示词优化参数不正确')
+  const rejectedGptOptimization = await fetch(`${origin}/api/prompt/optimize`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '生成一只猫', module: 'gpt' }),
+  })
+  if (rejectedGptOptimization.status !== 400) throw new Error('GPT 模块不应开放提示词优化')
 
   const invalidOrigin = await fetch(`${origin}/api/admin/logout`, {
     method: 'POST',

@@ -20,6 +20,7 @@ const app = express()
 const distDir = resolve('./dist')
 const sessionCookie = 'gpt_image_admin'
 const loginFailures = new Map()
+const promptOptimizeRequests = new Map()
 const proxyQueue = []
 const activeProxyItems = new Map()
 let activeProxyRequests = 0
@@ -633,11 +634,79 @@ app.post('/api-proxy/*path', async (req, res) => {
 
 app.use(express.json({ limit: '1mb' }))
 
+app.post('/api/prompt/optimize', async (req, res) => {
+  const startedAt = Date.now()
+  const requestId = randomUUID()
+  const ipAddress = getClientIp(req)
+  const ipHash = hashIp(ipAddress)
+  const prompt = typeof req.body.prompt === 'string' ? req.body.prompt.trim() : ''
+  const module = req.body.module === 'sensenova-u1' ? 'sensenova-u1' : ''
+
+  if (getActiveBlock(ipAddress)) return res.status(403).json({ error: '当前 IP 已被限制访问' })
+  if (module !== 'sensenova-u1') return res.status(400).json({ error: '提示词优化目前仅支持 U1 信息图' })
+  if (!config.dotsApiKey) return res.status(503).json({ error: '服务器尚未配置提示词优化服务' })
+  if (!prompt) return res.status(400).json({ error: '请先输入需要优化的提示词' })
+  if (prompt.length > 8000) return res.status(400).json({ error: '提示词不能超过 8000 个字符' })
+
+  const recent = (promptOptimizeRequests.get(ipHash) ?? []).filter((time) => time > Date.now() - 60_000)
+  if (recent.length >= 10) {
+    res.setHeader('Retry-After', '60')
+    return res.status(429).json({ error: '提示词优化过于频繁，请稍后再试' })
+  }
+  promptOptimizeRequests.set(ipHash, [...recent, Date.now()])
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 45_000)
+  try {
+    const response = await fetch(`${config.dotsApiUrl}/v1/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'api-key': config.dotsApiKey,
+      },
+      body: JSON.stringify({
+        model: config.dotsModel,
+        messages: [
+          {
+            role: 'system',
+            content: '你是专业的信息图生成提示词优化器。把用户输入改写成适合生成信息图、海报或知识卡片的中文提示词，补充清晰的信息层级、版式区域、标题与正文关系、配色、图标风格和文字可读性。保留用户原意、专有名词、所有 @图片引用、指定文字和明确约束，不捏造事实或添加用户没有要求的文案。输出完整可直接用于 U1 信息图模型的优化提示词，不要解释，不要使用 Markdown 标题或代码块。',
+          },
+          { role: 'user', content: prompt },
+        ],
+        stream: false,
+        max_tokens: 1200,
+        chat_template_kwargs: { enable_thinking: false },
+      }),
+      signal: controller.signal,
+    })
+    const payload = await response.json().catch(() => ({}))
+    if (!response.ok) {
+      const upstreamMessage = typeof payload.error?.message === 'string' ? sanitizeError(payload.error.message) : ''
+      throw new Error(upstreamMessage || `Dots API 返回 ${response.status}`)
+    }
+    const optimizedPrompt = typeof payload.choices?.[0]?.message?.content === 'string'
+      ? payload.choices[0].message.content.trim().replace(/^```(?:text)?\s*/, '').replace(/\s*```$/, '')
+      : ''
+    if (!optimizedPrompt) throw new Error('Dots API 未返回优化结果')
+
+    addLog({ requestId, type: 'request', event: 'prompt.optimize', ipHash, status: 'success', durationMs: Date.now() - startedAt, details: { module, inputLength: prompt.length, outputLength: optimizedPrompt.length } })
+    res.setHeader('Cache-Control', 'no-store')
+    res.json({ prompt: optimizedPrompt, model: config.dotsModel })
+  } catch (error) {
+    const message = error.name === 'AbortError' ? '提示词优化请求超时' : sanitizeError(error.message)
+    addLog({ requestId, level: 'error', type: 'system', event: 'prompt.optimize_error', ipHash, status: 'failed', durationMs: Date.now() - startedAt, details: { module, message } })
+    res.status(502).json({ error: message || '提示词优化失败' })
+  } finally {
+    clearTimeout(timeout)
+  }
+})
+
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
     upstreamConfigured: Boolean(config.upstreamApiKey),
     senseNovaConfigured: Boolean(config.senseNovaApiKey),
+    promptOptimizerConfigured: Boolean(config.dotsApiKey),
   })
 })
 

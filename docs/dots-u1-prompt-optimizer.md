@@ -1,0 +1,38 @@
+# U1 提示词优化
+
+## 功能范围
+
+- 仅在 `U1 信息图` 模块显示“优化提示词”按钮，GPT 生图不开放该入口。
+- 根据用户原文补充信息层级、版式区域、配色、图标风格和文字可读性。
+- 优化结果直接写回输入框，并可通过“撤销优化”恢复原文。
+- 提示词会发送至 Dots.ai 处理；服务器日志只记录调用状态、耗时和字符数，不记录优化前后的完整内容。
+
+## 服务端配置
+
+```env
+DOTS_API_URL=https://note3-prev-api.askdiandian.com
+DOTS_API_KEY=your-key
+DOTS_MODEL=dots3-note-prev
+```
+
+API Key 只能写入本地或服务器环境文件，不要提交到 Git。Docker 部署时将以上变量加入 `deploy/.env.server`，再执行一键更新。
+
+## 接口与限制
+
+- 前端调用同源接口：`POST /api/prompt/optimize`
+- 服务端调用 Dots：`POST /v1/chat/completions`
+- 使用非流式响应并关闭深度思考。
+- 输入最多 8000 个字符。
+- 每个 IP 每分钟最多调用 10 次。
+- 上游请求超时为 45 秒。
+- 被后台拉黑的 IP 无法使用提示词优化。
+
+## 验证
+
+```powershell
+npm test
+npm run test:server
+npm run build
+```
+
+服务端冒烟测试会使用本地模拟接口验证 U1 请求、Dots 请求参数，以及 GPT 模块拒绝逻辑，不消耗真实 API 额度。
