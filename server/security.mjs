@@ -42,7 +42,7 @@ export function sanitizeError(value) {
 
 export function safeDetails(value) {
   const allowed = {}
-  for (const key of ['announcementId', 'blockId', 'version', 'endpoint', 'model', 'imageCount', 'upstreamStatus', 'message', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position']) {
+  for (const key of ['announcementId', 'blockId', 'version', 'endpoint', 'model', 'module', 'imageCount', 'inputLength', 'outputLength', 'upstreamStatus', 'message', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position']) {
     if (value[key] !== undefined) allowed[key] = key === 'message' ? sanitizeError(value[key]) : value[key]
   }
   return JSON.stringify(allowed)

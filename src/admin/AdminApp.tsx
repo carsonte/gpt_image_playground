@@ -6,10 +6,10 @@ import {
   type AnnouncementDraft,
 } from '../lib/announcementApi'
 
-type Tab = 'dashboard' | 'live' | 'generations' | 'announcements' | 'ips' | 'logs' | 'settings'
+type Tab = 'dashboard' | 'live' | 'generations' | 'optimization' | 'announcements' | 'ips' | 'logs' | 'settings'
 
 const ADMIN_NAV_GROUPS: Array<{ label: string; items: Array<[Tab, string]> }> = [
-  { label: '监控', items: [['dashboard', '数据看板'], ['live', '实时任务'], ['generations', '生成记录']] },
+  { label: '监控', items: [['dashboard', '数据看板'], ['live', '实时任务'], ['generations', '生成记录'], ['optimization', '优化用量']] },
   { label: '运营', items: [['announcements', '公告管理'], ['ips', 'IP 管理'], ['logs', '日志中心']] },
   { label: '系统', items: [['settings', '系统设置']] },
 ]
@@ -24,6 +24,7 @@ type Summary = {
   averageDurationMs: number | null
   resolutions: Array<{ tier: string; requests: number; images: number }>
   modules: Array<{ module: 'gpt' | 'sensenova-u1'; requests: number; images: number; averageDurationMs: number | null }>
+  promptOptimization: { requests: number; successful: number; failed: number; uniqueIps: number; averageDurationMs: number | null }
 }
 
 type DailyTrend = {
@@ -34,6 +35,7 @@ type DailyTrend = {
   images: number
   successful: number
   failed: number
+  promptOptimizations: number
 }
 
 type KeywordStat = {
@@ -172,6 +174,7 @@ export default function AdminApp() {
   const [editing, setEditing] = useState<Announcement | null>(null)
   const [draft, setDraft] = useState<AnnouncementDraft>(EMPTY_ANNOUNCEMENT)
   const [logs, setLogs] = useState<LogItem[]>([])
+  const [optimizationLogs, setOptimizationLogs] = useState<LogItem[]>([])
   const [logType, setLogType] = useState('')
   const [ipUsage, setIpUsage] = useState<IpUsage[]>([])
   const [ipBlocks, setIpBlocks] = useState<IpBlock[]>([])
@@ -195,16 +198,17 @@ export default function AdminApp() {
 
   const loadDashboard = () => Promise.all([
     apiRequest<Summary>('/api/admin/stats/summary?period=30d'),
-    apiRequest<{ visits: Array<{ date: string; visits: number; unique_ips: number }>; generations: Array<{ date: string; requests: number; images: number; successful: number; failed: number }> }>('/api/admin/stats/trends?period=30d'),
+    apiRequest<{ visits: Array<{ date: string; visits: number; unique_ips: number }>; generations: Array<{ date: string; requests: number; images: number; successful: number; failed: number }>; promptOptimizations: Array<{ date: string; requests: number; successful: number; failed: number }> }>('/api/admin/stats/trends?period=30d'),
     apiRequest<{ keywords: KeywordStat[] }>('/api/admin/stats/keywords?period=30d&limit=20'),
   ]).then(([nextSummary, trends, keywordResult]) => {
     setSummary(nextSummary)
     setTopKeywords(keywordResult.keywords)
-    const dates = [...new Set([...trends.visits.map((item) => item.date), ...trends.generations.map((item) => item.date)])].sort()
+    const dates = [...new Set([...trends.visits.map((item) => item.date), ...trends.generations.map((item) => item.date), ...trends.promptOptimizations.map((item) => item.date)])].sort()
     setDailyTrend(dates.map((date) => {
       const visit = trends.visits.find((item) => item.date === date)
       const generation = trends.generations.find((item) => item.date === date)
-      return { date, visits: visit?.visits ?? 0, uniqueIps: visit?.unique_ips ?? 0, requests: generation?.requests ?? 0, images: generation?.images ?? 0, successful: generation?.successful ?? 0, failed: generation?.failed ?? 0 }
+      const promptOptimization = trends.promptOptimizations.find((item) => item.date === date)
+      return { date, visits: visit?.visits ?? 0, uniqueIps: visit?.unique_ips ?? 0, requests: generation?.requests ?? 0, images: generation?.images ?? 0, successful: generation?.successful ?? 0, failed: generation?.failed ?? 0, promptOptimizations: promptOptimization?.requests ?? 0 }
     }))
   })
   const loadLiveQueue = () => apiRequest<LiveQueueStatus>('/api/admin/queue/tasks').then(setLiveQueue)
@@ -223,6 +227,10 @@ export default function AdminApp() {
   })
   const loadAnnouncements = () => apiRequest<{ announcements: Announcement[] }>('/api/admin/announcements').then((result) => setAnnouncements(result.announcements))
   const loadLogs = () => apiRequest<{ logs: LogItem[] }>(`/api/admin/logs?limit=100${logType ? `&type=${encodeURIComponent(logType)}` : ''}`).then((result) => setLogs(result.logs))
+  const loadOptimization = () => Promise.all([
+    loadDashboard(),
+    apiRequest<{ logs: LogItem[] }>('/api/admin/logs?limit=200&eventPrefix=prompt.optimize').then((result) => setOptimizationLogs(result.logs)),
+  ])
   const loadIps = () => Promise.all([
     apiRequest<{ items: IpUsage[] }>('/api/admin/ip-usage?period=30d&limit=200'),
     apiRequest<{ blocks: IpBlock[] }>('/api/admin/ip-blocks'),
@@ -294,7 +302,7 @@ export default function AdminApp() {
   useEffect(() => {
     if (!authenticated) return
     setError('')
-    const action = tab === 'dashboard' ? Promise.all([loadDashboard(), loadLiveQueue()]) : tab === 'live' ? loadLiveQueue() : tab === 'settings' ? loadSettings() : tab === 'generations' ? loadGenerations() : tab === 'announcements' ? loadAnnouncements() : tab === 'ips' ? loadIps() : loadLogs()
+    const action = tab === 'dashboard' ? Promise.all([loadDashboard(), loadLiveQueue()]) : tab === 'live' ? loadLiveQueue() : tab === 'settings' ? loadSettings() : tab === 'generations' ? loadGenerations() : tab === 'optimization' ? loadOptimization() : tab === 'announcements' ? loadAnnouncements() : tab === 'ips' ? loadIps() : loadLogs()
     void action.catch((err) => setError(err.message))
   }, [authenticated, tab, logType, generationIp, generationQuery, generationDateFrom, generationDateTo, generationModule])
 
@@ -421,8 +429,8 @@ export default function AdminApp() {
         </div>
       </header>
 
-      <div className="mx-auto grid max-w-7xl gap-6 px-5 py-6 lg:grid-cols-[220px_1fr]">
-        <nav className="flex gap-2 overflow-x-auto lg:flex-col lg:overflow-visible">
+      <div className="mx-auto grid max-w-[1500px] gap-6 px-5 py-6 lg:grid-cols-[220px_minmax(0,1fr)]">
+        <nav className="flex gap-2 overflow-x-auto lg:sticky lg:top-6 lg:flex-col lg:overflow-visible lg:rounded-2xl lg:border lg:border-gray-200 lg:bg-white lg:p-3 lg:shadow-sm dark:lg:border-white/[0.08] dark:lg:bg-gray-900">
           {ADMIN_NAV_GROUPS.map((group) => <div key={group.label} className="contents lg:flex lg:flex-col lg:gap-1">
             <div className="hidden px-3 pb-1 pt-3 text-[11px] font-semibold uppercase tracking-[0.16em] text-gray-400 first:pt-0 lg:block">{group.label}</div>
             {group.items.map(([value, label]) => (
@@ -451,20 +459,21 @@ export default function AdminApp() {
                   ['平均耗时（含排队）', formatDuration(summary.averageDurationMs)], ['日均生图请求', Math.round(summary.requests / 30 * 10) / 10], ['单日峰值', Math.max(0, ...dailyTrend.map((item) => item.requests))],
                 ].map(([label, value]) => <div key={label} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="text-sm text-gray-500">{label}</div><div className="mt-2 text-3xl font-bold">{value}</div></div>)}
               </div>
-              <div className="mt-6 grid gap-4 md:grid-cols-2">
+              <div className="mt-6 grid gap-4 md:grid-cols-2 xl:grid-cols-3">
                 {(['gpt', 'sensenova-u1'] as const).map((module) => {
                   const item = summary.modules.find((value) => value.module === module)
                   return <div key={module} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="flex items-center justify-between"><h2 className="font-bold">{module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</h2><span className="rounded-full bg-blue-50 px-2 py-1 text-xs text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">独立统计</span></div><div className="mt-4 grid grid-cols-3 gap-3 text-sm"><div><div className="text-gray-500">请求</div><strong className="mt-1 block text-xl">{item?.requests ?? 0}</strong></div><div><div className="text-gray-500">图片</div><strong className="mt-1 block text-xl">{item?.images ?? 0}</strong></div><div><div className="text-gray-500">平均耗时</div><strong className="mt-1 block text-base">{formatDuration(item?.averageDurationMs ?? null)}</strong></div></div></div>
                 })}
+                <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="flex items-center justify-between"><h2 className="font-bold">提示词优化</h2><span className="rounded-full bg-violet-50 px-2 py-1 text-xs text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">小红书 AI</span></div><div className="mt-4 grid grid-cols-3 gap-3 text-sm"><div><div className="text-gray-500">调用</div><strong className="mt-1 block text-xl">{summary.promptOptimization.requests}</strong></div><div><div className="text-gray-500">成功 / 失败</div><strong className="mt-1 block text-base">{summary.promptOptimization.successful} / {summary.promptOptimization.failed}</strong></div><div><div className="text-gray-500">平均耗时</div><strong className="mt-1 block text-base">{formatDuration(summary.promptOptimization.averageDurationMs)}</strong></div></div><div className="mt-4 border-t border-gray-100 pt-3 text-xs text-gray-500 dark:border-white/[0.06]">使用 IP：{summary.promptOptimization.uniqueIps} 个</div></div>
               </div>
 
               <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,2fr)_minmax(280px,1fr)]">
                 <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900">
-                  <div className="flex items-center justify-between"><div><h2 className="font-bold">每日使用趋势</h2><p className="mt-1 text-xs text-gray-500">蓝色为访问次数，紫色为生图请求</p></div><div className="flex gap-3 text-xs"><span className="text-blue-600">● 访问</span><span className="text-violet-600">● 生图</span></div></div>
+                  <div className="flex items-center justify-between"><div><h2 className="font-bold">每日使用趋势</h2><p className="mt-1 text-xs text-gray-500">访问、生图与提示词优化调用趋势</p></div><div className="flex gap-3 text-xs"><span className="text-blue-600">● 访问</span><span className="text-violet-600">● 生图</span><span className="text-amber-600">● 优化</span></div></div>
                   <div className="mt-6 flex h-56 items-end gap-1 overflow-x-auto border-b border-gray-200 pb-1 dark:border-white/[0.08]">
                     {dailyTrend.map((item) => {
-                      const max = Math.max(1, ...dailyTrend.flatMap((day) => [day.visits, day.requests]))
-                      return <div key={item.date} title={`${item.date}\n访问 ${item.visits}\n生图请求 ${item.requests}\n图片 ${item.images}\n成功 ${item.successful}\n失败 ${item.failed}`} className="flex h-full min-w-5 flex-1 items-end justify-center gap-0.5"><div className="w-2 rounded-t bg-blue-400" style={{ height: `${Math.max(item.visits ? 4 : 0, item.visits / max * 100)}%` }} /><div className="w-2 rounded-t bg-violet-500" style={{ height: `${Math.max(item.requests ? 4 : 0, item.requests / max * 100)}%` }} /></div>
+                      const max = Math.max(1, ...dailyTrend.flatMap((day) => [day.visits, day.requests, day.promptOptimizations]))
+                      return <div key={item.date} title={`${item.date}\n访问 ${item.visits}\n生图请求 ${item.requests}\n图片 ${item.images}\n成功 ${item.successful}\n失败 ${item.failed}\n提示词优化 ${item.promptOptimizations}`} className="flex h-full min-w-6 flex-1 items-end justify-center gap-0.5"><div className="w-1.5 rounded-t bg-blue-400" style={{ height: `${Math.max(item.visits ? 4 : 0, item.visits / max * 100)}%` }} /><div className="w-1.5 rounded-t bg-violet-500" style={{ height: `${Math.max(item.requests ? 4 : 0, item.requests / max * 100)}%` }} /><div className="w-1.5 rounded-t bg-amber-500" style={{ height: `${Math.max(item.promptOptimizations ? 4 : 0, item.promptOptimizations / max * 100)}%` }} /></div>
                     })}
                     {!dailyTrend.length && <div className="m-auto text-sm text-gray-500">暂无趋势数据</div>}
                   </div>
@@ -588,6 +597,40 @@ export default function AdminApp() {
                   </article>
                 ))}
                 {!generations.length && <div className="rounded-2xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">暂无生成记录；新请求会从本次更新后开始记录提示词。</div>}
+              </div>
+            </section>
+          )}
+
+          {tab === 'optimization' && summary && (
+            <section>
+              <div className="mb-5 flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-bold">提示词优化用量</h1><p className="mt-1 text-sm text-gray-500">统计最近 30 天的小红书 AI 优化调用；只保存长度、状态、耗时和 IP 哈希，不保存原始或优化后的提示词。</p></div><span className="rounded-xl bg-violet-50 px-3 py-2 text-sm font-medium text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">U1 信息图专用</span></div>
+              <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                {[
+                  ['总调用', summary.promptOptimization.requests],
+                  ['成功调用', summary.promptOptimization.successful],
+                  ['失败调用', summary.promptOptimization.failed],
+                  ['成功率', `${summary.promptOptimization.requests ? Math.round(summary.promptOptimization.successful / summary.promptOptimization.requests * 1000) / 10 : 0}%`],
+                  ['平均耗时', formatDuration(summary.promptOptimization.averageDurationMs)],
+                ].map(([label, value]) => <div key={label} className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><div className="text-sm text-gray-500">{label}</div><div className="mt-2 text-3xl font-bold">{value}</div></div>)}
+              </div>
+              <div className="mt-6 grid gap-6 xl:grid-cols-[minmax(0,2fr)_320px]">
+                <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900">
+                  <div><h2 className="font-bold">每日优化趋势</h2><p className="mt-1 text-xs text-gray-500">按优化请求发起日期统计，包括成功和失败调用。</p></div>
+                  <div className="mt-6 flex h-52 items-end gap-2 overflow-x-auto border-b border-gray-200 pb-1 dark:border-white/[0.08]">
+                    {dailyTrend.map((item) => {
+                      const max = Math.max(1, ...dailyTrend.map((day) => day.promptOptimizations))
+                      return <div key={item.date} title={`${item.date}\n优化调用 ${item.promptOptimizations}`} className="flex h-full min-w-6 flex-1 items-end justify-center"><div className="w-3 rounded-t bg-gradient-to-t from-violet-600 to-fuchsia-400" style={{ height: `${Math.max(item.promptOptimizations ? 5 : 0, item.promptOptimizations / max * 100)}%` }} /></div>
+                    })}
+                    {!dailyTrend.length && <div className="m-auto text-sm text-gray-500">暂无优化用量</div>}
+                  </div>
+                  {dailyTrend.length > 0 && <div className="mt-2 flex justify-between text-[11px] text-gray-400"><span>{dailyTrend[0].date}</span><span>{dailyTrend[dailyTrend.length - 1].date}</span></div>}
+                </div>
+                <div className="rounded-2xl border border-gray-200 bg-white p-5 dark:border-white/[0.08] dark:bg-gray-900"><h2 className="font-bold">使用概况</h2><div className="mt-5 space-y-4"><div className="flex items-center justify-between border-b border-gray-100 pb-4 text-sm dark:border-white/[0.06]"><span className="text-gray-500">使用 IP</span><strong>{summary.promptOptimization.uniqueIps} 个</strong></div><div className="flex items-center justify-between border-b border-gray-100 pb-4 text-sm dark:border-white/[0.06]"><span className="text-gray-500">日均调用</span><strong>{Math.round(summary.promptOptimization.requests / 30 * 10) / 10}</strong></div><div className="flex items-center justify-between text-sm"><span className="text-gray-500">单日峰值</span><strong>{Math.max(0, ...dailyTrend.map((item) => item.promptOptimizations))}</strong></div></div></div>
+              </div>
+              <div className="mt-6 overflow-hidden rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900">
+                <div className="border-b border-gray-100 px-5 py-4 dark:border-white/[0.06]"><h2 className="font-bold">最近优化调用</h2><p className="mt-1 text-xs text-gray-500">最多显示 200 条，只记录用量元数据。</p></div>
+                <div className="overflow-x-auto"><table className="min-w-full text-left text-sm"><thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03]"><tr>{['时间', '状态', '输入长度', '输出长度', '耗时', 'IP 哈希', '请求 ID'].map((item) => <th key={item} className="px-4 py-3 font-medium">{item}</th>)}</tr></thead><tbody className="divide-y divide-gray-100 dark:divide-white/[0.06]">{optimizationLogs.map((item) => <tr key={item.id}><td className="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{localDate(item.createdAt)}</td><td className="px-4 py-3"><span className={`rounded-full px-2 py-1 text-xs ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300'}`}>{item.status === 'success' ? '成功' : '失败'}</span></td><td className="px-4 py-3">{String(item.details.inputLength ?? '—')}</td><td className="px-4 py-3">{String(item.details.outputLength ?? '—')}</td><td className="whitespace-nowrap px-4 py-3">{formatDuration(item.durationMs)}</td><td className="px-4 py-3 font-mono text-xs text-gray-500">{item.ipHash || '—'}</td><td className="max-w-[180px] truncate px-4 py-3 font-mono text-xs text-gray-500" title={item.requestId}>{item.requestId}</td></tr>)}</tbody></table></div>
+                {!optimizationLogs.length && <div className="p-10 text-center text-sm text-gray-500">暂无提示词优化调用</div>}
               </div>
             </section>
           )}

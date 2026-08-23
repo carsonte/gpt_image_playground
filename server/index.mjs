@@ -1079,6 +1079,15 @@ app.get('/api/admin/stats/summary', (req, res) => {
     FROM generation_events WHERE created_at >= ?
     GROUP BY module ORDER BY requests DESC
   `).all(start)
+  const promptOptimization = db.prepare(`
+    SELECT COUNT(*) AS requests,
+      COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS successful,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed,
+      COUNT(DISTINCT ip_hash) AS unique_ips,
+      ROUND(AVG(CASE WHEN status = 'success' THEN duration_ms END)) AS average_duration_ms
+    FROM logs
+    WHERE created_at >= ? AND event IN ('prompt.optimize', 'prompt.optimize_error')
+  `).get(start)
   res.json({
     visits: visits.count,
     uniqueIps: visits.unique_ips,
@@ -1094,6 +1103,13 @@ app.get('/api/admin/stats/summary', (req, res) => {
       images: item.images,
       averageDurationMs: item.average_duration_ms,
     })),
+    promptOptimization: {
+      requests: promptOptimization.requests,
+      successful: promptOptimization.successful,
+      failed: promptOptimization.failed,
+      uniqueIps: promptOptimization.unique_ips,
+      averageDurationMs: promptOptimization.average_duration_ms,
+    },
   })
 })
 
@@ -1110,7 +1126,15 @@ app.get('/api/admin/stats/trends', (req, res) => {
       COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed
     FROM generation_events WHERE created_at >= ? GROUP BY date ORDER BY date
   `).all(start)
-  res.json({ visits, generations })
+  const promptOptimizations = db.prepare(`
+    SELECT substr(created_at, 1, 10) AS date, COUNT(*) AS requests,
+      COALESCE(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END), 0) AS successful,
+      COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+    FROM logs
+    WHERE created_at >= ? AND event IN ('prompt.optimize', 'prompt.optimize_error')
+    GROUP BY date ORDER BY date
+  `).all(start)
+  res.json({ visits, generations, promptOptimizations })
 })
 
 app.get('/api/admin/stats/keywords', (req, res) => {
@@ -1289,6 +1313,11 @@ app.get('/api/admin/logs', (req, res) => {
     if (!value) continue
     conditions.push(`${column} = ?`)
     params.push(value)
+  }
+  const eventPrefix = String(req.query.eventPrefix ?? '').trim().slice(0, 100)
+  if (eventPrefix) {
+    conditions.push('event LIKE ?')
+    params.push(`${eventPrefix}%`)
   }
   const limit = Math.max(1, Math.min(200, Number.parseInt(req.query.limit ?? 50, 10) || 50))
   const offset = Math.max(0, Number.parseInt(req.query.offset ?? 0, 10) || 0)

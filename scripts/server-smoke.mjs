@@ -190,6 +190,11 @@ try {
   if (summary.payload.requests !== 2 || summary.payload.images !== 2 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
   if (!summary.payload.modules.some((item) => item.module === 'sensenova-u1' && item.requests === 1)) throw new Error('U1 独立统计结果不正确')
   if (!Number.isFinite(summary.payload.averageDurationMs) || summary.payload.averageDurationMs < 100) throw new Error('平均完成耗时统计结果不正确')
+  if (summary.payload.promptOptimization?.requests !== 1 || summary.payload.promptOptimization.successful !== 1 || summary.payload.promptOptimization.failed !== 0 || summary.payload.promptOptimization.uniqueIps !== 1 || !Number.isFinite(summary.payload.promptOptimization.averageDurationMs)) throw new Error('提示词优化用量统计结果不正确')
+  const trends = await request('/api/admin/stats/trends?period=30d', { headers: { Cookie: cookie } })
+  if (!trends.payload.promptOptimizations.some((item) => item.requests === 1 && item.successful === 1)) throw new Error('提示词优化趋势统计结果不正确')
+  const optimizationLogs = await request('/api/admin/logs?eventPrefix=prompt.optimize', { headers: { Cookie: cookie } })
+  if (optimizationLogs.payload.total !== 1 || optimizationLogs.payload.logs[0]?.event !== 'prompt.optimize' || !Number.isFinite(optimizationLogs.payload.logs[0]?.details?.inputLength)) throw new Error('提示词优化调用记录筛选结果不正确')
 
   const generations = await request('/api/admin/generations', { headers: { Cookie: cookie } })
   if (generations.payload.items[0]?.prompt !== 'U1 信息图测试' || generations.payload.items[0]?.module !== 'sensenova-u1') throw new Error('U1 提示词审计或模块记录不正确')
