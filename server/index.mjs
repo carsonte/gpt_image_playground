@@ -1215,6 +1215,12 @@ app.get('/api/admin/generations', (req, res) => {
   })
 })
 
+app.delete('/api/admin/generations', (req, res) => {
+  const result = db.prepare('DELETE FROM generation_events').run()
+  addLog({ type: 'admin', event: 'generations.clear', ipHash: getIpHash(req), status: 'success', details: { deletedCount: result.changes } })
+  res.json({ deleted: result.changes })
+})
+
 app.get('/api/admin/ip-usage', (req, res) => {
   const start = periodStart(String(req.query.period ?? '30d'))
   const limit = Math.max(1, Math.min(500, Number.parseInt(req.query.limit ?? 100, 10) || 100))

@@ -319,6 +319,10 @@ try {
 
   const logs = await request('/api/admin/logs?limit=20', { headers: { Cookie: cookie } })
   if (!logs.payload.logs.some((item) => item.event === 'announcement.publish')) throw new Error('公告发布日志缺失')
+  const clearedGenerations = await request('/api/admin/generations', { method: 'DELETE', headers: { Cookie: cookie, Origin: origin } })
+  if (clearedGenerations.payload.deleted < 1) throw new Error('清空生成记录未删除数据')
+  const emptyGenerations = await request('/api/admin/generations', { headers: { Cookie: cookie } })
+  if (emptyGenerations.payload.items.length !== 0) throw new Error('清空生成记录后仍存在旧数据')
   console.log('Server smoke test passed')
 } finally {
   child.kill('SIGTERM')

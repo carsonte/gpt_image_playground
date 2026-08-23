@@ -398,6 +398,17 @@ export default function AdminApp() {
     await loadIps()
   }
 
+  const clearGenerations = async () => {
+    if (!window.confirm('确定清空全部生成记录吗？此操作不会删除用户浏览器中的图片，但无法恢复后台记录。')) return
+    setError('')
+    try {
+      await apiRequest('/api/admin/generations', { method: 'DELETE' })
+      setGenerations([])
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成记录清空失败')
+    }
+  }
+
   if (authenticated === null) {
     return <div className="flex min-h-screen items-center justify-center text-sm text-gray-500">正在连接后台…</div>
   }
@@ -579,7 +590,7 @@ export default function AdminApp() {
 
           {tab === 'generations' && (
             <section>
-              <div className="mb-4"><h1 className="text-2xl font-bold">生成记录</h1><p className="mt-1 text-sm text-gray-500">查看提示词和请求参数，不保存生成图片。</p></div>
+              <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-bold">生成记录</h1><p className="mt-1 text-sm text-gray-500">查看提示词和请求参数，不保存生成图片；列表区域可独立滚动。</p></div><button type="button" onClick={() => void clearGenerations()} disabled={!generations.length} className="rounded-xl border border-red-200 px-4 py-2.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-500/20 dark:hover:bg-red-500/10">清空全部记录</button></div>
               <div className="mb-4 flex flex-wrap items-end gap-3 rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900">
                 <label className="text-sm">文字搜索<input value={generationQuery} onChange={(e) => setGenerationQuery(e.target.value)} className={`${fieldClass()} mt-1 w-64`} placeholder="提示词、模型或请求 ID" /></label>
                 <label className="text-sm">IP 地址<input value={generationIp} onChange={(e) => setGenerationIp(e.target.value)} className={`${fieldClass()} mt-1 w-44 font-mono`} placeholder="留空显示全部" /></label>
@@ -588,7 +599,7 @@ export default function AdminApp() {
                 <label className="text-sm">结束日期<input type="date" value={generationDateTo} onChange={(e) => setGenerationDateTo(e.target.value)} className={`${fieldClass()} mt-1 w-40`} /></label>
                 <button type="button" onClick={() => { setGenerationQuery(''); setGenerationIp(''); setGenerationDateFrom(''); setGenerationDateTo(''); setGenerationModule('') }} className="rounded-xl border border-gray-200 px-4 py-2.5 text-sm hover:bg-gray-50 dark:border-white/[0.1] dark:hover:bg-white/[0.06]">清空筛选</button>
               </div>
-              <div className="space-y-3">
+              <div className="max-h-[calc(100vh-270px)] min-h-64 space-y-3 overflow-y-auto overscroll-contain pr-2">
                 {generations.map((item) => (
                   <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900">
                     <div className="flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2 py-1 font-medium ${item.action === 'edit' ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'}`}>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span className="rounded-full bg-violet-50 px-2 py-1 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className={`rounded-full px-2 py-1 ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10' : item.status === 'failed' ? 'bg-red-50 text-red-600 dark:bg-red-500/10' : 'bg-gray-100 text-gray-500 dark:bg-white/[0.06]'}`}>{item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '处理中'}</span><span className="font-mono text-gray-500">{item.ipAddress || '未知 IP'}</span><span className="text-gray-400">{localDate(item.createdAt)}</span></div>
