@@ -12,14 +12,17 @@ let upstreamActive = 0
 let maxUpstreamActive = 0
 let upstreamPrompts = []
 let upstreamPayloads = []
+let upstreamPaths = []
 const upstream = createServer(async (req, res) => {
+  upstreamPaths.push(req.url)
   const chunks = []
   await new Promise((resolve) => {
     req.on('data', (chunk) => chunks.push(chunk))
     req.on('end', resolve)
   })
+  let payload = null
   try {
-    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
     if (typeof payload.prompt === 'string') upstreamPrompts.push(payload.prompt)
     upstreamPayloads.push(payload)
   } catch {
@@ -28,7 +31,8 @@ const upstream = createServer(async (req, res) => {
   upstreamActive += 1
   maxUpstreamActive = Math.max(maxUpstreamActive, upstreamActive)
   await new Promise((resolve) => setTimeout(resolve, 120))
-  res.writeHead(200, { 'Content-Type': 'application/json' })
+  const status = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫' ? 502 : 200
+  res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(req.url === '/v1/chat/completions'
     ? { choices: [{ message: { content: '优化后的 U1 信息图提示词，完整保留价格“19.9 元”' } }] }
     : { data: [] }))
@@ -49,6 +53,9 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     UPSTREAM_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     UPSTREAM_API_KEY: 'test-upstream-key',
     UPSTREAM_CONCURRENCY: '1',
+    SIXONER_API_URL: `http://127.0.0.1:${upstreamPort}/sixoner/v1`,
+    SIXONER_API_KEY: 'test-sixoner-key',
+    SIXONER_MODEL: 'gpt-image-2',
     SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     SENSENOVA_API_KEY: 'test-sensenova-key',
     SENSENOVA_CONCURRENCY: '1',
@@ -90,12 +97,14 @@ try {
 
   const initialQueueSettings = await request('/api/admin/settings/queue', { headers: { Cookie: cookie } })
   if (initialQueueSettings.payload.concurrency !== 1 || initialQueueSettings.payload.perIpConcurrency !== 2 || initialQueueSettings.payload.perIpQueueLimit !== 3) throw new Error('队列默认配置不正确')
+  if (initialQueueSettings.payload.gptChannel !== 'sixoner' || !initialQueueSettings.payload.primaryConfigured || !initialQueueSettings.payload.sixonerConfigured) throw new Error('GPT 生图渠道默认配置不正确')
   const updatedQueueSettings = await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2 }),
+    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2, gptChannel: 'primary' }),
   })
   if (updatedQueueSettings.payload.concurrency !== 2 || updatedQueueSettings.payload.perIpConcurrency !== 1 || updatedQueueSettings.payload.perIpQueueLimit !== 2) throw new Error('后台队列配置未生效')
+  if (updatedQueueSettings.payload.gptChannel !== 'primary') throw new Error('GPT 生图渠道切换未生效')
   const publicQueueSettings = await request('/api/queue/status')
   if (publicQueueSettings.payload.concurrency !== 2) throw new Error('前台队列状态未同步后台配置')
   const senseNovaQueueSettings = await request('/api/queue/status?module=sensenova-u1')
@@ -103,7 +112,7 @@ try {
   await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3 }),
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3, gptChannel: 'sixoner' }),
   })
   const initialSiteSettings = await request('/api/admin/settings/site', { headers: { Cookie: cookie } })
   if (!initialSiteSettings.payload.privacyNoticeEnabled || !initialSiteSettings.payload.queueStatusEnabled) throw new Error('首页提示默认配置不正确')
@@ -173,11 +182,15 @@ try {
     body: JSON.stringify({ prompt: '数量限制测试', n: 2 }),
   })
   if (rejectedImageCount.status !== 400) throw new Error('服务器未拒绝单次多图请求')
-  await request('/api-proxy/images/generations', {
+  const gptImageResult = await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 1 }),
   })
+  if (!upstreamPaths.includes('/sixoner/v1/images/generations')) throw new Error('GPT 请求未转发到 Sixoner 线路')
+  if (!upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('Sixoner 失败后未自动转发到 BlackEngine 备用线路')
+  const fallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
+  if (fallbackLogs.payload.total !== 1 || fallbackLogs.payload.logs[0]?.details?.upstreamStatus !== 502) throw new Error('GPT 生图回退日志不正确')
   await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Image-Module': 'sensenova-u1' },

@@ -56,6 +56,9 @@ type QueueSettings = {
   senseNovaActive: number
   senseNovaWaiting: number
   senseNovaConfigured: boolean
+  gptChannel: 'primary' | 'sixoner'
+  primaryConfigured: boolean
+  sixonerConfigured: boolean
 }
 
 type SiteSettings = {
@@ -261,6 +264,7 @@ export default function AdminApp() {
           senseNovaConcurrency: Number(senseNovaConcurrencyInput),
           senseNovaPerIpConcurrency: Number(senseNovaPerIpConcurrencyInput),
           senseNovaPerIpQueueLimit: Number(senseNovaPerIpQueueLimitInput),
+          gptChannel: queueSettings?.gptChannel ?? 'sixoner',
         }),
       })
       setQueueSettings(result)
@@ -549,9 +553,10 @@ export default function AdminApp() {
                   <div className="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/[0.08] dark:bg-white/[0.025]">
                     <div className="flex items-start justify-between gap-3">
                       <div className="flex min-w-0 items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 font-bold text-white">G</span><div><h3 className="font-semibold">GPT 生图队列</h3><p className="mt-0.5 text-xs text-gray-500">通用图片生成与编辑任务</p></div></div>
-                      <span className="rounded-full bg-green-50 px-2.5 py-1 text-xs font-medium text-green-700 dark:bg-green-500/10 dark:text-green-300">运行中</span>
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${(queueSettings?.gptChannel === 'sixoner' ? queueSettings.sixonerConfigured : queueSettings?.primaryConfigured) ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{queueSettings?.gptChannel === 'sixoner' ? 'Sixoner 主线路' : 'BlackEngine 备用线路'}</span>
                     </div>
                     {queueSettings && <div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">正在生成</div><div className="mt-1 text-xl font-bold">{queueSettings.active}</div></div><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">等待队列</div><div className="mt-1 text-xl font-bold">{queueSettings.waiting}</div></div></div>}
+                    {queueSettings && <label className="mt-4 block text-sm font-medium">GPT 生图路由<select value={queueSettings.gptChannel} onChange={(e) => setQueueSettings({ ...queueSettings, gptChannel: e.target.value as QueueSettings['gptChannel'] })} className={`${fieldClass()} mt-1.5`}><option value="sixoner" disabled={!queueSettings.sixonerConfigured}>Sixoner 主线路 → BlackEngine 自动备用{queueSettings.sixonerConfigured ? '' : ' · 未配置'}</option><option value="primary" disabled={!queueSettings.primaryConfigured}>强制使用 BlackEngine 备用线路{queueSettings.primaryConfigured ? '' : ' · 未配置'}</option></select><span className="mt-1 block text-[11px] font-normal text-gray-400">主线路网络异常、限流、鉴权或服务端错误时自动走备用线路；400/422 等请求参数错误不会重试。</span></label>}
                     <div className="mt-4 grid gap-3 sm:grid-cols-3">
                       <label className="text-sm font-medium">全站并发上限<input type="number" min="1" max="20" value={queueConcurrency} onChange={(e) => setQueueConcurrency(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同时处理的任务数</span></label>
                       <label className="text-sm font-medium">单 IP 并发上限<input type="number" min="1" max="20" value={perIpConcurrency} onChange={(e) => setPerIpConcurrency(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同一用户同时运行</span></label>

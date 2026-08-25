@@ -28,6 +28,8 @@ const senseNovaQueue = []
 const activeSenseNovaItems = new Map()
 let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
+const gptChannels = new Set(['primary', 'sixoner'])
+const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
 const senseNovaSizes = new Set([
   '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
   '1760x2368', '2272x1824', '1824x2272', '3072x1376', '1344x3136',
@@ -71,6 +73,8 @@ let senseNovaPerIpQueueLimit = Number.isFinite(savedSenseNovaPerIpQueueLimit)
 let privacyNoticeEnabled = readAppSetting('privacy_notice_enabled', 'true') === 'true'
 let privacyNoticeText = readAppSetting('privacy_notice_text', defaultPrivacyNotice)
 let queueStatusEnabled = readAppSetting('queue_status_enabled', 'true') === 'true'
+const savedGptChannel = readAppSetting('gpt_upstream_channel', 'sixoner')
+let gptChannel = gptChannels.has(savedGptChannel) ? savedGptChannel : 'sixoner'
 
 app.set('trust proxy', config.trustProxy)
 app.disable('x-powered-by')
@@ -520,7 +524,11 @@ app.post('/api-proxy/*path', async (req, res) => {
     addLog({ requestId, level: 'warn', type: 'security', event: 'proxy.content_type_rejected', ipHash, status: 'rejected', details: { endpoint } })
     return res.status(415).json({ error: '请求格式不受支持', requestId })
   }
-  if (!config.upstreamApiKey) return res.status(503).json({ error: '服务器尚未配置上游 API Key', requestId })
+  const primaryUpstream = { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel }
+  let gptUpstream = gptChannel === 'sixoner'
+    ? { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
+    : primaryUpstream
+  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置${gptUpstream.channel === 'sixoner' ? ' Sixoner' : '主线路'} API Key`, requestId })
 
   const auditParams = readParamsAudit(req)
   const auditedImageCount = Math.max(1, Number.parseInt(auditParams.n ?? 1, 10) || 1)
@@ -548,14 +556,14 @@ app.post('/api-proxy/*path', async (req, res) => {
   if (!slot) return
 
   try {
-    let model = config.upstreamModel
+    let model = gptUpstream.model
     let body
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
         body = await readBody(req)
         const payload = JSON.parse(body.toString('utf8'))
-        payload.model = config.upstreamModel
-        model = config.upstreamModel
+        payload.model = gptUpstream.model
+        model = gptUpstream.model
         if (!prompt && typeof payload.prompt === 'string') prompt = payload.prompt.trim().slice(0, 5000)
         if (typeof payload.size === 'string') size = payload.size.slice(0, 40)
         if (typeof payload.quality === 'string') quality = payload.quality.slice(0, 40)
@@ -564,7 +572,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (endpoint.startsWith('/images/')) payload.n = 1
         body = Buffer.from(JSON.stringify(payload))
       } else {
-        body = Readable.toWeb(req)
+        body = await readBody(req, 60 * 1024 * 1024)
       }
     } catch (error) {
       return res.status(400).json({ error: sanitizeError(error.message), requestId })
@@ -578,18 +586,37 @@ app.post('/api-proxy/*path', async (req, res) => {
     `).run(requestId, ipHash, ipAddress, endpoint, action, model, prompt, size, getResolutionTier(size), quality, imageCount, now())
 
     try {
-      const headers = {
-        Authorization: `Bearer ${config.upstreamApiKey}`,
-        Accept: req.headers.accept || 'application/json',
+      const sendUpstream = (upstream) => {
+        const headers = {
+          Authorization: `Bearer ${upstream.apiKey}`,
+          Accept: req.headers.accept || 'application/json',
+        }
+        if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type']
+        return fetch(`${upstream.apiUrl}${endpoint}`, {
+          method: 'POST',
+          headers,
+          body,
+          duplex: 'half',
+          signal: AbortSignal.timeout(600_000),
+        })
       }
-      if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type']
-      const response = await fetch(`${config.upstreamApiUrl}${endpoint}`, {
-        method: 'POST',
-        headers,
-        body,
-        duplex: 'half',
-        signal: AbortSignal.timeout(600_000),
-      })
+      let fallbackStatus = null
+      let response
+      try {
+        response = await sendUpstream(gptUpstream)
+        if (gptUpstream.channel === 'sixoner' && primaryUpstream.apiKey && (gptFallbackStatuses.has(response.status) || response.status >= 500)) {
+          fallbackStatus = response.status
+          await response.body?.cancel()
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: 'sixoner', to: 'primary', upstreamStatus: fallbackStatus } })
+          gptUpstream = primaryUpstream
+          response = await sendUpstream(gptUpstream)
+        }
+      } catch (error) {
+        if (gptUpstream.channel !== 'sixoner' || !primaryUpstream.apiKey) throw error
+        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: 'sixoner', to: 'primary', message: sanitizeError(error.message) } })
+        gptUpstream = primaryUpstream
+        response = await sendUpstream(gptUpstream)
+      }
       const durationMs = Date.now() - startedAt
       const status = response.ok ? 'success' : 'failed'
       db.prepare(`
@@ -605,7 +632,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         ipHash,
         status,
         durationMs,
-        details: { endpoint, model, imageCount, upstreamStatus: response.status, queueWaitMs: slot.waitedMs },
+        details: { endpoint, model, imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, queueWaitMs: slot.waitedMs },
       })
 
       res.status(response.status)
@@ -614,6 +641,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (value) res.setHeader(name, value)
       }
       res.setHeader('X-Request-Id', requestId)
+      res.setHeader('X-Image-Upstream', gptUpstream.channel)
       if (!response.body) return res.end()
       Readable.fromWeb(response.body).pipe(res)
     } catch (error) {
@@ -624,7 +652,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         SET status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
       `).run(durationMs, message, now(), requestId)
-      addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, model, imageCount, message } })
+      addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, model, imageCount, channel: gptUpstream.channel, message } })
       res.status(502).json({ error: '上游图片服务请求失败', requestId })
     }
   } finally {
@@ -727,7 +755,10 @@ app.post('/api/prompt/optimize', async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
-    upstreamConfigured: Boolean(config.upstreamApiKey),
+    upstreamConfigured: Boolean(gptChannel === 'sixoner' ? config.sixonerApiKey : config.upstreamApiKey),
+    gptChannel,
+    primaryConfigured: Boolean(config.upstreamApiKey),
+    sixonerConfigured: Boolean(config.sixonerApiKey),
     senseNovaConfigured: Boolean(config.senseNovaApiKey),
     promptOptimizerConfigured: Boolean(config.dotsApiKey),
   })
@@ -839,6 +870,9 @@ app.get('/api/admin/settings/queue', (_req, res) => {
     senseNovaActive: activeSenseNovaRequests,
     senseNovaWaiting: senseNovaQueue.length,
     senseNovaConfigured: Boolean(config.senseNovaApiKey),
+    gptChannel,
+    primaryConfigured: Boolean(config.upstreamApiKey),
+    sixonerConfigured: Boolean(config.sixonerApiKey),
   })
 })
 
@@ -892,6 +926,7 @@ app.put('/api/admin/settings/queue', (req, res) => {
   const nextSenseNovaConcurrency = Number.parseInt(req.body.senseNovaConcurrency ?? senseNovaConcurrency, 10)
   const nextSenseNovaPerIpConcurrency = Number.parseInt(req.body.senseNovaPerIpConcurrency ?? senseNovaPerIpConcurrency, 10)
   const nextSenseNovaPerIpQueueLimit = Number.parseInt(req.body.senseNovaPerIpQueueLimit ?? senseNovaPerIpQueueLimit, 10)
+  const nextGptChannel = String(req.body.gptChannel ?? gptChannel)
   if (!Number.isFinite(concurrency) || concurrency < 1 || concurrency > 20) {
     return res.status(400).json({ error: '并发数量必须是 1–20 的整数' })
   }
@@ -910,12 +945,22 @@ app.put('/api/admin/settings/queue', (req, res) => {
   if (!Number.isFinite(nextSenseNovaPerIpQueueLimit) || nextSenseNovaPerIpQueueLimit < 0 || nextSenseNovaPerIpQueueLimit > 100) {
     return res.status(400).json({ error: 'U1 单 IP 排队上限必须是 0–100 的整数' })
   }
+  if (!gptChannels.has(nextGptChannel)) {
+    return res.status(400).json({ error: 'GPT 生图渠道无效' })
+  }
+  if (nextGptChannel === 'sixoner' && !config.sixonerApiKey) {
+    return res.status(400).json({ error: '服务器尚未配置 Sixoner API Key' })
+  }
+  if (nextGptChannel === 'primary' && !config.upstreamApiKey) {
+    return res.status(400).json({ error: '服务器尚未配置主线路 API Key' })
+  }
   upstreamConcurrency = concurrency
   perIpConcurrency = nextPerIpConcurrency
   perIpQueueLimit = nextPerIpQueueLimit
   senseNovaConcurrency = nextSenseNovaConcurrency
   senseNovaPerIpConcurrency = nextSenseNovaPerIpConcurrency
   senseNovaPerIpQueueLimit = nextSenseNovaPerIpQueueLimit
+  gptChannel = nextGptChannel
   const saveQueueSettings = db.transaction(() => {
     saveAppSetting('upstream_concurrency', concurrency)
     saveAppSetting('per_ip_concurrency', perIpConcurrency)
@@ -923,11 +968,12 @@ app.put('/api/admin/settings/queue', (req, res) => {
     saveAppSetting('sensenova_concurrency', senseNovaConcurrency)
     saveAppSetting('sensenova_per_ip_concurrency', senseNovaPerIpConcurrency)
     saveAppSetting('sensenova_per_ip_queue_limit', senseNovaPerIpQueueLimit)
+    saveAppSetting('gpt_upstream_channel', gptChannel)
   })
   saveQueueSettings()
   runProxyQueue()
   runSenseNovaQueue()
-  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit, senseNovaConcurrency, senseNovaPerIpConcurrency, senseNovaPerIpQueueLimit } })
+  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit, senseNovaConcurrency, senseNovaPerIpConcurrency, senseNovaPerIpQueueLimit, gptChannel } })
   res.json({
     concurrency: upstreamConcurrency,
     perIpConcurrency,
@@ -940,6 +986,9 @@ app.put('/api/admin/settings/queue', (req, res) => {
     senseNovaActive: activeSenseNovaRequests,
     senseNovaWaiting: senseNovaQueue.length,
     senseNovaConfigured: Boolean(config.senseNovaApiKey),
+    gptChannel,
+    primaryConfigured: Boolean(config.upstreamApiKey),
+    sixonerConfigured: Boolean(config.sixonerApiKey),
   })
 })
 
