@@ -128,7 +128,9 @@ function getResolutionTier(size) {
 }
 
 function getUpstreamModel(upstream, size) {
+  if (upstream.channel === 'catapi' && getResolutionTier(size) === '2K') return config.catApi2kModel
   if (upstream.channel === 'catapi' && getResolutionTier(size) === '4K') return config.catApi4kModel
+  if (upstream.channel === 'sixoner' && getResolutionTier(size) === '2K') return config.sixoner2kModel
   if (upstream.channel === 'sixoner' && getResolutionTier(size) === '4K') return config.sixoner4kModel
   return upstream.model
 }

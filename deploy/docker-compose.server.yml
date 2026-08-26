@@ -13,10 +13,12 @@ services:
       SIXONER_API_URL: ${SIXONER_API_URL:-https://sub.sixoner.com/v1}
       SIXONER_API_KEY: ${SIXONER_API_KEY:-}
       SIXONER_MODEL: ${SIXONER_MODEL:-gpt-image-2}
+      SIXONER_2K_MODEL: ${SIXONER_2K_MODEL:-gpt-image-2-2k}
       SIXONER_4K_MODEL: ${SIXONER_4K_MODEL:-gpt-image-2-4k}
       CATAPI_API_URL: ${CATAPI_API_URL:-https://catapi.cc.cd/v1}
       CATAPI_API_KEY: ${CATAPI_API_KEY:-}
       CATAPI_MODEL: ${CATAPI_MODEL:-gpt-image-2}
+      CATAPI_2K_MODEL: ${CATAPI_2K_MODEL:-gpt-image-2-2k}
       CATAPI_4K_MODEL: ${CATAPI_4K_MODEL:-gpt-image-2-4k}
       SENSENOVA_API_URL: ${SENSENOVA_API_URL:-https://token.sensenova.cn/v1}
       SENSENOVA_API_KEY: ${SENSENOVA_API_KEY:-}

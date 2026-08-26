@@ -23,3 +23,4 @@ SIXONER_MODEL=gpt-image-2
 - 测试模型：`gpt-image-2`。
 - 测试结果：PNG、1024×1024，约 57 秒返回。
 - 接口模型列表包含 `gpt-image`、`gpt-image-2` 及 1K、2K、4K 变体。
+- 服务端按请求尺寸自动选模：1K 使用 `SIXONER_MODEL`，2K 使用 `SIXONER_2K_MODEL`，4K 使用 `SIXONER_4K_MODEL`。

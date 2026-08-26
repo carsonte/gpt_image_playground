@@ -69,10 +69,12 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     SIXONER_API_URL: `http://127.0.0.1:${upstreamPort}/sixoner/v1`,
     SIXONER_API_KEY: 'test-sixoner-key',
     SIXONER_MODEL: 'gpt-image-2',
+    SIXONER_2K_MODEL: 'gpt-image-2-2k',
     SIXONER_4K_MODEL: 'gpt-image-2-4k',
     CATAPI_API_URL: `http://127.0.0.1:${upstreamPort}/catapi/v1`,
     CATAPI_API_KEY: 'test-catapi-key',
     CATAPI_MODEL: 'gpt-image-2',
+    CATAPI_2K_MODEL: 'gpt-image-2-2k',
     CATAPI_4K_MODEL: 'gpt-image-2-4k',
     SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     SENSENOVA_API_KEY: 'test-sensenova-key',
@@ -255,6 +257,8 @@ try {
   const recordDuringDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordDuringDelivery.payload.items[0]?.status !== 'started') throw new Error('图片响应尚未传输完成时生成记录被提前标记完成')
   const deliveryResponse = await deliveryRequest
+  const deliveryPayload = upstreamPayloads.find((item) => item.prompt === '响应传输完成测试')
+  if (deliveryPayload?.model !== 'gpt-image-2-2k' || deliveryResponse.headers.get('x-image-model') !== 'gpt-image-2-2k') throw new Error('CatAPI 2K 请求未使用专用模型')
   await deliveryResponse.json()
   const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')

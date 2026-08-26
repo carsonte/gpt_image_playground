@@ -24,8 +24,8 @@ CATAPI_MODEL=gpt-image-2
 - 测试模型：`gpt-image-2`。
 - 测试结果：PNG；请求 1024×1024，实际返回 1254×1254，约 43 秒。
 - 4K 测试：`gpt-image-2-4k` 请求 3840×2160，实际返回 3840×2160 PNG，约 29 秒、5.7 MB。
-- CatAPI 的通用 `gpt-image-2` 会把部分 4K 请求降级为约 1K；服务端因此按请求尺寸自动选模：1K/2K 使用 `CATAPI_MODEL`，4K 使用 `CATAPI_4K_MODEL`（默认 `gpt-image-2-4k`）。生图和图片编辑均应用该规则。
-- 4K 请求在 CatAPI 和 Sixoner 都使用各自的 `gpt-image-2-4k` 专用模型；回退 BlackEngine 时，服务端重新写入 BlackEngine 的模型名，避免把渠道专用模型传给最终备用线路。
+- CatAPI 的通用 `gpt-image-2` 会把部分高分辨率请求降级；服务端因此按请求尺寸自动选模：1K 使用 `CATAPI_MODEL`，2K 使用 `CATAPI_2K_MODEL`（默认 `gpt-image-2-2k`），4K 使用 `CATAPI_4K_MODEL`（默认 `gpt-image-2-4k`）。生图和图片编辑均应用该规则。
+- 2K/4K 请求在 CatAPI 和 Sixoner 都使用各自的 `gpt-image-2-2k`/`gpt-image-2-4k` 专用模型；回退 BlackEngine 时，服务端重新写入 BlackEngine 的模型名，避免把渠道专用模型传给最终备用线路。
 - 模型列表包含 `gpt-image-2`、`gpt-image-2-2k`、`gpt-image-2-4k`。
 
 ## 完成状态
