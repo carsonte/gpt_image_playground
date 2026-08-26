@@ -13,6 +13,9 @@ services:
       SIXONER_API_URL: ${SIXONER_API_URL:-https://sub.sixoner.com/v1}
       SIXONER_API_KEY: ${SIXONER_API_KEY:-}
       SIXONER_MODEL: ${SIXONER_MODEL:-gpt-image-2}
+      CATAPI_API_URL: ${CATAPI_API_URL:-https://catapi.cc.cd/v1}
+      CATAPI_API_KEY: ${CATAPI_API_KEY:-}
+      CATAPI_MODEL: ${CATAPI_MODEL:-gpt-image-2}
       SENSENOVA_API_URL: ${SENSENOVA_API_URL:-https://token.sensenova.cn/v1}
       SENSENOVA_API_KEY: ${SENSENOVA_API_KEY:-}
       SENSENOVA_MODEL: ${SENSENOVA_MODEL:-sensenova-u1-fast}

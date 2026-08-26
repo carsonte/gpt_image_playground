@@ -30,8 +30,16 @@ const upstream = createServer(async (req, res) => {
   }
   upstreamActive += 1
   maxUpstreamActive = Math.max(maxUpstreamActive, upstreamActive)
+  if (req.url === '/catapi/v1/images/generations' && payload?.prompt === '响应传输完成测试') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.write('{"data":[')
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    res.end(']}')
+    upstreamActive -= 1
+    return
+  }
   await new Promise((resolve) => setTimeout(resolve, 120))
-  const status = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫' ? 502 : 200
+  const status = req.url === '/catapi/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫' ? 502 : 200
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(req.url === '/v1/chat/completions'
     ? { choices: [{ message: { content: '优化后的 U1 信息图提示词，完整保留价格“19.9 元”' } }] }
@@ -56,6 +64,9 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     SIXONER_API_URL: `http://127.0.0.1:${upstreamPort}/sixoner/v1`,
     SIXONER_API_KEY: 'test-sixoner-key',
     SIXONER_MODEL: 'gpt-image-2',
+    CATAPI_API_URL: `http://127.0.0.1:${upstreamPort}/catapi/v1`,
+    CATAPI_API_KEY: 'test-catapi-key',
+    CATAPI_MODEL: 'gpt-image-2',
     SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     SENSENOVA_API_KEY: 'test-sensenova-key',
     SENSENOVA_CONCURRENCY: '1',
@@ -97,14 +108,14 @@ try {
 
   const initialQueueSettings = await request('/api/admin/settings/queue', { headers: { Cookie: cookie } })
   if (initialQueueSettings.payload.concurrency !== 1 || initialQueueSettings.payload.perIpConcurrency !== 2 || initialQueueSettings.payload.perIpQueueLimit !== 3) throw new Error('队列默认配置不正确')
-  if (initialQueueSettings.payload.gptChannel !== 'sixoner' || !initialQueueSettings.payload.primaryConfigured || !initialQueueSettings.payload.sixonerConfigured) throw new Error('GPT 生图渠道默认配置不正确')
+  if (initialQueueSettings.payload.gptChannel !== 'sixoner' || !initialQueueSettings.payload.primaryConfigured || !initialQueueSettings.payload.sixonerConfigured || !initialQueueSettings.payload.catApiConfigured) throw new Error('GPT 生图渠道默认配置不正确')
   const updatedQueueSettings = await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2, gptChannel: 'primary' }),
+    body: JSON.stringify({ concurrency: 2, perIpConcurrency: 1, perIpQueueLimit: 2, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2, gptChannel: 'catapi' }),
   })
   if (updatedQueueSettings.payload.concurrency !== 2 || updatedQueueSettings.payload.perIpConcurrency !== 1 || updatedQueueSettings.payload.perIpQueueLimit !== 2) throw new Error('后台队列配置未生效')
-  if (updatedQueueSettings.payload.gptChannel !== 'primary') throw new Error('GPT 生图渠道切换未生效')
+  if (updatedQueueSettings.payload.gptChannel !== 'catapi') throw new Error('GPT 生图渠道切换未生效')
   const publicQueueSettings = await request('/api/queue/status')
   if (publicQueueSettings.payload.concurrency !== 2) throw new Error('前台队列状态未同步后台配置')
   const senseNovaQueueSettings = await request('/api/queue/status?module=sensenova-u1')
@@ -112,7 +123,7 @@ try {
   await request('/api/admin/settings/queue', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
-    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3, gptChannel: 'sixoner' }),
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3, gptChannel: 'catapi' }),
   })
   const initialSiteSettings = await request('/api/admin/settings/site', { headers: { Cookie: cookie } })
   if (!initialSiteSettings.payload.privacyNoticeEnabled || !initialSiteSettings.payload.queueStatusEnabled) throw new Error('首页提示默认配置不正确')
@@ -187,8 +198,8 @@ try {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 1 }),
   })
-  if (!upstreamPaths.includes('/sixoner/v1/images/generations')) throw new Error('GPT 请求未转发到 Sixoner 线路')
-  if (!upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('Sixoner 失败后未自动转发到 BlackEngine 备用线路')
+  if (!upstreamPaths.includes('/catapi/v1/images/generations')) throw new Error('GPT 请求未转发到 CatAPI 线路')
+  if (!upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('CatAPI 失败后未自动转发到 BlackEngine 备用线路')
   const fallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
   if (fallbackLogs.payload.total !== 1 || fallbackLogs.payload.logs[0]?.details?.upstreamStatus !== 502) throw new Error('GPT 生图回退日志不正确')
   await request('/api-proxy/images/generations', {
@@ -219,6 +230,25 @@ try {
   if (future.payload.items.length !== 0) throw new Error('生成记录日期筛选结果不正确')
   const keywords = await request('/api/admin/stats/keywords?period=30d', { headers: { Cookie: cookie } })
   if (!keywords.payload.keywords.some((item) => item.keyword === '橘猫' && item.count === 1)) throw new Error('热门关键词统计结果不正确')
+
+  const deliveryRequest = fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '响应传输完成测试', size: '2048x2048', n: 1 }),
+  })
+  let activeDuringDelivery
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    activeDuringDelivery = await request('/api/admin/queue/tasks', { headers: { Cookie: cookie } })
+    if (activeDuringDelivery.payload.active.length === 1) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  if (activeDuringDelivery.payload.active.length !== 1) throw new Error('图片响应尚未传输完成时任务提前离开生成中列表')
+  const recordDuringDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
+  if (recordDuringDelivery.payload.items[0]?.status !== 'started') throw new Error('图片响应尚未传输完成时生成记录被提前标记完成')
+  const deliveryResponse = await deliveryRequest
+  await deliveryResponse.json()
+  const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
+  if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')
 
   const usage = await request('/api/admin/ip-usage?period=30d', { headers: { Cookie: cookie } })
   const localIp = usage.payload.items.find((item) => item.ipAddress === '127.0.0.1')

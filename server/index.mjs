@@ -1,6 +1,7 @@
 import { createReadStream, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { Readable } from 'node:stream'
+import { finished, pipeline } from 'node:stream/promises'
 import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
 import express from 'express'
@@ -28,7 +29,7 @@ const senseNovaQueue = []
 const activeSenseNovaItems = new Map()
 let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
-const gptChannels = new Set(['primary', 'sixoner'])
+const gptChannels = new Set(['sixoner', 'catapi'])
 const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
 const senseNovaSizes = new Set([
   '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
@@ -468,6 +469,12 @@ app.post('/api-proxy/*path', async (req, res, next) => {
         addLog({ requestId, level: 'warn', type: 'system', event: 'sensenova.image_normalize_failed', ipHash, status: 'fallback', details: { message: sanitizeError(error.message) } })
       }
     }
+    res.status(response.status)
+    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json')
+    res.setHeader('X-Request-Id', requestId)
+    const delivered = finished(res)
+    res.end(body)
+    await delivered
     const durationMs = Date.now() - startedAt
     const status = response.ok ? 'success' : 'failed'
     db.prepare(`
@@ -485,10 +492,6 @@ app.post('/api-proxy/*path', async (req, res, next) => {
       durationMs,
       details: { endpoint, module: 'sensenova-u1', model: config.senseNovaModel, imageCount: 1, upstreamStatus: response.status, queueWaitMs: slot.waitedMs },
     })
-    res.status(response.status)
-    res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json')
-    res.setHeader('X-Request-Id', requestId)
-    res.end(body)
   } catch (error) {
     const durationMs = Date.now() - startedAt
     const message = sanitizeError(error.message)
@@ -498,7 +501,8 @@ app.post('/api-proxy/*path', async (req, res, next) => {
       WHERE request_id = ?
     `).run(durationMs, message, now(), requestId)
     addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, module: 'sensenova-u1', model: config.senseNovaModel, message } })
-    res.status(502).json({ error: 'SenseNova 图片服务请求失败', requestId })
+    if (!res.headersSent) res.status(502).json({ error: 'SenseNova 图片服务请求失败', requestId })
+    else if (!res.destroyed && !res.writableEnded) res.end()
   } finally {
     slot.release()
   }
@@ -525,10 +529,10 @@ app.post('/api-proxy/*path', async (req, res) => {
     return res.status(415).json({ error: '请求格式不受支持', requestId })
   }
   const primaryUpstream = { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel }
-  let gptUpstream = gptChannel === 'sixoner'
-    ? { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
-    : primaryUpstream
-  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置${gptUpstream.channel === 'sixoner' ? ' Sixoner' : '主线路'} API Key`, requestId })
+  let gptUpstream = gptChannel === 'catapi'
+    ? { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel }
+    : { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
+  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置 ${gptUpstream.channel === 'catapi' ? 'CatAPI' : 'Sixoner'} API Key`, requestId })
 
   const auditParams = readParamsAudit(req)
   const auditedImageCount = Math.max(1, Number.parseInt(auditParams.n ?? 1, 10) || 1)
@@ -604,18 +608,32 @@ app.post('/api-proxy/*path', async (req, res) => {
       let response
       try {
         response = await sendUpstream(gptUpstream)
-        if (gptUpstream.channel === 'sixoner' && primaryUpstream.apiKey && (gptFallbackStatuses.has(response.status) || response.status >= 500)) {
+        if (gptUpstream.channel !== 'primary' && primaryUpstream.apiKey && (gptFallbackStatuses.has(response.status) || response.status >= 500)) {
           fallbackStatus = response.status
           await response.body?.cancel()
-          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: 'sixoner', to: 'primary', upstreamStatus: fallbackStatus } })
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: 'primary', upstreamStatus: fallbackStatus } })
           gptUpstream = primaryUpstream
           response = await sendUpstream(gptUpstream)
         }
       } catch (error) {
-        if (gptUpstream.channel !== 'sixoner' || !primaryUpstream.apiKey) throw error
-        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: 'sixoner', to: 'primary', message: sanitizeError(error.message) } })
+        if (gptUpstream.channel === 'primary' || !primaryUpstream.apiKey) throw error
+        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: 'primary', message: sanitizeError(error.message) } })
         gptUpstream = primaryUpstream
         response = await sendUpstream(gptUpstream)
+      }
+      res.status(response.status)
+      for (const name of ['content-type', 'cache-control']) {
+        const value = response.headers.get(name)
+        if (value) res.setHeader(name, value)
+      }
+      res.setHeader('X-Request-Id', requestId)
+      res.setHeader('X-Image-Upstream', gptUpstream.channel)
+      if (response.body) {
+        await pipeline(Readable.fromWeb(response.body), res)
+      } else {
+        const delivered = finished(res)
+        res.end()
+        await delivered
       }
       const durationMs = Date.now() - startedAt
       const status = response.ok ? 'success' : 'failed'
@@ -634,16 +652,6 @@ app.post('/api-proxy/*path', async (req, res) => {
         durationMs,
         details: { endpoint, model, imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, queueWaitMs: slot.waitedMs },
       })
-
-      res.status(response.status)
-      for (const name of ['content-type', 'cache-control']) {
-        const value = response.headers.get(name)
-        if (value) res.setHeader(name, value)
-      }
-      res.setHeader('X-Request-Id', requestId)
-      res.setHeader('X-Image-Upstream', gptUpstream.channel)
-      if (!response.body) return res.end()
-      Readable.fromWeb(response.body).pipe(res)
     } catch (error) {
       const durationMs = Date.now() - startedAt
       const message = sanitizeError(error.message)
@@ -653,7 +661,8 @@ app.post('/api-proxy/*path', async (req, res) => {
         WHERE request_id = ?
       `).run(durationMs, message, now(), requestId)
       addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, model, imageCount, channel: gptUpstream.channel, message } })
-      res.status(502).json({ error: '上游图片服务请求失败', requestId })
+      if (!res.headersSent) res.status(502).json({ error: '上游图片服务请求失败', requestId })
+      else if (!res.destroyed && !res.writableEnded) res.end()
     }
   } finally {
     slot.release()
@@ -755,10 +764,11 @@ app.post('/api/prompt/optimize', async (req, res) => {
 app.get('/api/health', (_req, res) => {
   res.json({
     ok: true,
-    upstreamConfigured: Boolean(gptChannel === 'sixoner' ? config.sixonerApiKey : config.upstreamApiKey),
+    upstreamConfigured: Boolean(gptChannel === 'catapi' ? config.catApiKey : config.sixonerApiKey),
     gptChannel,
     primaryConfigured: Boolean(config.upstreamApiKey),
     sixonerConfigured: Boolean(config.sixonerApiKey),
+    catApiConfigured: Boolean(config.catApiKey),
     senseNovaConfigured: Boolean(config.senseNovaApiKey),
     promptOptimizerConfigured: Boolean(config.dotsApiKey),
   })
@@ -873,6 +883,7 @@ app.get('/api/admin/settings/queue', (_req, res) => {
     gptChannel,
     primaryConfigured: Boolean(config.upstreamApiKey),
     sixonerConfigured: Boolean(config.sixonerApiKey),
+    catApiConfigured: Boolean(config.catApiKey),
   })
 })
 
@@ -951,8 +962,8 @@ app.put('/api/admin/settings/queue', (req, res) => {
   if (nextGptChannel === 'sixoner' && !config.sixonerApiKey) {
     return res.status(400).json({ error: '服务器尚未配置 Sixoner API Key' })
   }
-  if (nextGptChannel === 'primary' && !config.upstreamApiKey) {
-    return res.status(400).json({ error: '服务器尚未配置主线路 API Key' })
+  if (nextGptChannel === 'catapi' && !config.catApiKey) {
+    return res.status(400).json({ error: '服务器尚未配置 CatAPI API Key' })
   }
   upstreamConcurrency = concurrency
   perIpConcurrency = nextPerIpConcurrency
@@ -989,6 +1000,7 @@ app.put('/api/admin/settings/queue', (req, res) => {
     gptChannel,
     primaryConfigured: Boolean(config.upstreamApiKey),
     sixonerConfigured: Boolean(config.sixonerApiKey),
+    catApiConfigured: Boolean(config.catApiKey),
   })
 })
 

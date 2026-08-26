@@ -56,9 +56,10 @@ type QueueSettings = {
   senseNovaActive: number
   senseNovaWaiting: number
   senseNovaConfigured: boolean
-  gptChannel: 'primary' | 'sixoner'
+  gptChannel: 'sixoner' | 'catapi'
   primaryConfigured: boolean
   sixonerConfigured: boolean
+  catApiConfigured: boolean
 }
 
 type SiteSettings = {
@@ -164,6 +165,49 @@ function toDateInput(value: string | null) {
 
 function fieldClass() {
   return 'w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none transition focus:border-blue-400 focus:ring-2 focus:ring-blue-500/15 dark:border-white/[0.1] dark:bg-gray-900'
+}
+
+type QueueLimitFieldProps = {
+  label: string
+  hint: string
+  value: string
+  min: number
+  max: number
+  onChange: (value: string) => void
+}
+
+function QueueLimitField({ label, hint, value, min, max, onChange }: QueueLimitFieldProps) {
+  return (
+    <label className="text-sm font-medium">
+      {label}
+      <input type="number" min={min} max={max} value={value} onChange={(event) => onChange(event.target.value)} className={`${fieldClass()} mt-1.5 tabular-nums`} />
+      <span className="mt-1 block text-[11px] font-normal text-gray-400">{hint}</span>
+    </label>
+  )
+}
+
+type GptRouteOptionProps = {
+  channel: QueueSettings['gptChannel']
+  name: string
+  description: string
+  selected: boolean
+  configured: boolean
+  onChange: (channel: QueueSettings['gptChannel']) => void
+}
+
+function GptRouteOption({ channel, name, description, selected, configured, onChange }: GptRouteOptionProps) {
+  return (
+    <label className={`flex min-h-28 cursor-pointer flex-col justify-between rounded-2xl border p-4 transition ${selected ? 'border-blue-500 bg-blue-50/70 ring-2 ring-blue-500/10 dark:bg-blue-500/[0.08]' : 'border-gray-200 bg-gray-50/70 hover:border-gray-300 dark:border-white/[0.08] dark:bg-white/[0.025] dark:hover:border-white/[0.16]'} ${configured ? '' : 'cursor-not-allowed opacity-50'}`}>
+      <span className="flex items-start justify-between gap-3">
+        <span>
+          <span className="flex items-center gap-2 text-sm font-semibold"><span>{name}</span><span className="text-gray-300 dark:text-gray-600">→</span><span>BlackEngine</span></span>
+          <span className="mt-1.5 block text-xs leading-5 text-gray-500">{description}</span>
+        </span>
+        <input type="radio" name="gpt-channel" value={channel} checked={selected} disabled={!configured} onChange={() => onChange(channel)} className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600" />
+      </span>
+      <span className={`mt-3 text-[11px] font-medium ${configured ? 'text-green-600 dark:text-green-300' : 'text-amber-600 dark:text-amber-300'}`}>{configured ? '主线路已配置' : '主线路尚未配置'}</span>
+    </label>
+  )
 }
 
 export default function AdminApp() {
@@ -541,39 +585,46 @@ export default function AdminApp() {
 
           {tab === 'settings' && (
             <section>
-              <div className="mb-6"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">管理两个生图模块的队列限额与首页公开信息，保存后立即生效。</p></div>
+              <div className="mb-6"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">先选择 GPT 生图线路，再分别设置两个模块的并发与单 IP 限额。</p></div>
 
               <form onSubmit={saveQueueSettings} className="mb-6 rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-100 px-5 py-4 dark:border-white/[0.06]">
-                  <div><h2 className="font-bold">生成队列与 IP 限流</h2><p className="mt-1 text-xs text-gray-500">两个模块使用独立队列，单个 IP 达到上限后不会挤占其他用户的生成位置。</p></div>
-                  <button type="submit" className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700">保存队列设置</button>
+                  <div><h2 className="font-bold">生图服务控制</h2><p className="mt-1 text-xs text-gray-500">线路选择和队列限制统一保存，两个模块仍使用各自独立的队列。</p></div>
+                  <button type="submit" disabled={!queueSettings} className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">保存并应用</button>
                 </div>
 
-                <div className="grid gap-4 p-5 xl:grid-cols-2">
-                  <div className="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/[0.08] dark:bg-white/[0.025]">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-blue-600 font-bold text-white">G</span><div><h3 className="font-semibold">GPT 生图队列</h3><p className="mt-0.5 text-xs text-gray-500">通用图片生成与编辑任务</p></div></div>
-                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${(queueSettings?.gptChannel === 'sixoner' ? queueSettings.sixonerConfigured : queueSettings?.primaryConfigured) ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{queueSettings?.gptChannel === 'sixoner' ? 'Sixoner 主线路' : 'BlackEngine 备用线路'}</span>
+                <div className="p-5">
+                  {queueSettings && <fieldset>
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div><legend className="font-semibold">GPT 生图线路</legend><p className="mt-1 text-xs leading-5 text-gray-500">选择一条主线路；发生网络、鉴权、限流或服务端错误时自动回退到 BlackEngine。</p></div>
+                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${queueSettings.primaryConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>BlackEngine {queueSettings.primaryConfigured ? '备用可用' : '尚未配置'}</span>
                     </div>
-                    {queueSettings && <div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">正在生成</div><div className="mt-1 text-xl font-bold">{queueSettings.active}</div></div><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">等待队列</div><div className="mt-1 text-xl font-bold">{queueSettings.waiting}</div></div></div>}
-                    {queueSettings && <label className="mt-4 block text-sm font-medium">GPT 生图路由<select value={queueSettings.gptChannel} onChange={(e) => setQueueSettings({ ...queueSettings, gptChannel: e.target.value as QueueSettings['gptChannel'] })} className={`${fieldClass()} mt-1.5`}><option value="sixoner" disabled={!queueSettings.sixonerConfigured}>Sixoner 主线路 → BlackEngine 自动备用{queueSettings.sixonerConfigured ? '' : ' · 未配置'}</option><option value="primary" disabled={!queueSettings.primaryConfigured}>强制使用 BlackEngine 备用线路{queueSettings.primaryConfigured ? '' : ' · 未配置'}</option></select><span className="mt-1 block text-[11px] font-normal text-gray-400">主线路网络异常、限流、鉴权或服务端错误时自动走备用线路；400/422 等请求参数错误不会重试。</span></label>}
-                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                      <label className="text-sm font-medium">全站并发上限<input type="number" min="1" max="20" value={queueConcurrency} onChange={(e) => setQueueConcurrency(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同时处理的任务数</span></label>
-                      <label className="text-sm font-medium">单 IP 并发上限<input type="number" min="1" max="20" value={perIpConcurrency} onChange={(e) => setPerIpConcurrency(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同一用户同时运行</span></label>
-                      <label className="text-sm font-medium">单 IP 排队上限<input type="number" min="0" max="100" value={perIpQueueLimit} onChange={(e) => setPerIpQueueLimit(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">超出后拒绝请求</span></label>
+                    <div className="mt-4 grid gap-3 md:grid-cols-2">
+                      <GptRouteOption channel="sixoner" name="Sixoner" description="当前默认线路，异常时转入 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                      <GptRouteOption channel="catapi" name="CatAPI" description="可选主线路，异常时转入 BlackEngine。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
                     </div>
-                  </div>
+                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">切换规则：</span>保存后，新提交任务立即使用新线路；正在生成和已经排队的任务继续使用进入队列时的线路，不会中途切换。</div>
+                  </fieldset>}
 
-                  <div className="rounded-2xl border border-gray-200 bg-gray-50/70 p-4 dark:border-white/[0.08] dark:bg-white/[0.025]">
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex min-w-0 items-center gap-3"><span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-violet-600 font-bold text-white">U1</span><div><h3 className="font-semibold">U1 信息图队列</h3><p className="mt-0.5 text-xs text-gray-500">SenseNova U1 Fast 独立任务</p></div></div>
-                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${queueSettings?.senseNovaConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{queueSettings?.senseNovaConfigured ? 'API 已配置' : 'API Key 未配置'}</span>
-                    </div>
-                    {queueSettings && <div className="mt-4 grid grid-cols-2 gap-2"><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">正在生成</div><div className="mt-1 text-xl font-bold">{queueSettings.senseNovaActive}</div></div><div className="rounded-xl bg-white px-3 py-2.5 dark:bg-white/[0.04]"><div className="text-xs text-gray-500">等待队列</div><div className="mt-1 text-xl font-bold">{queueSettings.senseNovaWaiting}</div></div></div>}
-                    <div className="mt-4 grid gap-3 sm:grid-cols-3">
-                      <label className="text-sm font-medium">全站并发上限<input type="number" min="1" max="20" value={senseNovaConcurrencyInput} onChange={(e) => setSenseNovaConcurrencyInput(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同时处理的任务数</span></label>
-                      <label className="text-sm font-medium">单 IP 并发上限<input type="number" min="1" max="20" value={senseNovaPerIpConcurrencyInput} onChange={(e) => setSenseNovaPerIpConcurrencyInput(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">同一用户同时运行</span></label>
-                      <label className="text-sm font-medium">单 IP 排队上限<input type="number" min="0" max="100" value={senseNovaPerIpQueueLimitInput} onChange={(e) => setSenseNovaPerIpQueueLimitInput(e.target.value)} className={`${fieldClass()} mt-1.5`} /><span className="mt-1 block text-[11px] font-normal text-gray-400">超出后拒绝请求</span></label>
+                  <div className="mt-7 border-t border-gray-100 pt-6 dark:border-white/[0.06]">
+                    <div><h3 className="font-semibold">并发与 IP 限流</h3><p className="mt-1 text-xs leading-5 text-gray-500">“生成中”持续到图片响应完整传输；单个 IP 达到运行和排队总上限后，新的请求会被拒绝。</p></div>
+                    <div className="mt-5 grid gap-6 xl:grid-cols-2 xl:divide-x xl:divide-gray-100 dark:xl:divide-white/[0.06]">
+                      <div className="xl:pr-6">
+                        <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-medium">GPT 生图</h4><p className="mt-0.5 text-xs text-gray-500">通用图片生成与编辑任务</p></div>{queueSettings && <div className="flex gap-2 text-xs"><span className="rounded-lg bg-amber-50 px-2.5 py-1.5 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">生成中 <b className="tabular-nums">{queueSettings.active}</b></span><span className="rounded-lg bg-gray-100 px-2.5 py-1.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300">排队 <b className="tabular-nums">{queueSettings.waiting}</b></span></div>}</div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                          <QueueLimitField label="全站并发" hint="同时处理任务数" value={queueConcurrency} min={1} max={20} onChange={setQueueConcurrency} />
+                          <QueueLimitField label="单 IP 并发" hint="同一用户同时运行" value={perIpConcurrency} min={1} max={20} onChange={setPerIpConcurrency} />
+                          <QueueLimitField label="单 IP 排队" hint="超出后拒绝请求" value={perIpQueueLimit} min={0} max={100} onChange={setPerIpQueueLimit} />
+                        </div>
+                      </div>
+                      <div className="xl:pl-6">
+                        <div className="flex flex-wrap items-start justify-between gap-3"><div><h4 className="font-medium">U1 信息图</h4><p className="mt-0.5 text-xs text-gray-500">SenseNova U1 Fast 独立任务</p></div>{queueSettings && <div className="flex items-center gap-2 text-xs"><span className={`rounded-lg px-2.5 py-1.5 ${queueSettings.senseNovaConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{queueSettings.senseNovaConfigured ? 'API 可用' : 'API 未配置'}</span><span className="rounded-lg bg-gray-100 px-2.5 py-1.5 text-gray-600 dark:bg-white/[0.06] dark:text-gray-300">生成中 <b className="tabular-nums">{queueSettings.senseNovaActive}</b> · 排队 <b className="tabular-nums">{queueSettings.senseNovaWaiting}</b></span></div>}</div>
+                        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+                          <QueueLimitField label="全站并发" hint="同时处理任务数" value={senseNovaConcurrencyInput} min={1} max={20} onChange={setSenseNovaConcurrencyInput} />
+                          <QueueLimitField label="单 IP 并发" hint="同一用户同时运行" value={senseNovaPerIpConcurrencyInput} min={1} max={20} onChange={setSenseNovaPerIpConcurrencyInput} />
+                          <QueueLimitField label="单 IP 排队" hint="超出后拒绝请求" value={senseNovaPerIpQueueLimitInput} min={0} max={100} onChange={setSenseNovaPerIpQueueLimitInput} />
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
