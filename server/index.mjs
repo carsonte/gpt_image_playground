@@ -127,6 +127,24 @@ function getResolutionTier(size) {
   return 'other'
 }
 
+function getUpstreamModel(upstream, size) {
+  if (upstream.channel === 'catapi' && getResolutionTier(size) === '4K') return config.catApi4kModel
+  if (upstream.channel === 'sixoner' && getResolutionTier(size) === '4K') return config.sixoner4kModel
+  return upstream.model
+}
+
+function replaceMultipartTextField(body, field, value) {
+  const marker = Buffer.from(`name="${field}"`)
+  const markerIndex = body.indexOf(marker)
+  if (markerIndex < 0) return body
+  const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), markerIndex + marker.length)
+  if (headerEnd < 0) return body
+  const valueStart = headerEnd + 4
+  const valueEnd = body.indexOf(Buffer.from('\r\n'), valueStart)
+  if (valueEnd < 0) return body
+  return Buffer.concat([body.subarray(0, valueStart), Buffer.from(value), body.subarray(valueEnd)])
+}
+
 function runProxyQueue() {
   while (activeProxyRequests < upstreamConcurrency && proxyQueue.length) {
     const activeByIp = new Map()
@@ -529,9 +547,13 @@ app.post('/api-proxy/*path', async (req, res) => {
     return res.status(415).json({ error: '请求格式不受支持', requestId })
   }
   const primaryUpstream = { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel }
-  let gptUpstream = gptChannel === 'catapi'
-    ? { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel }
-    : { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
+  const sixonerUpstream = { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
+  const catApiUpstream = { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel }
+  const upstreamChain = (gptChannel === 'catapi'
+    ? [catApiUpstream, sixonerUpstream, primaryUpstream]
+    : [sixonerUpstream, primaryUpstream]
+  ).filter((upstream, idx) => idx === 0 || upstream.apiKey)
+  let gptUpstream = upstreamChain[0]
   if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置 ${gptUpstream.channel === 'catapi' ? 'CatAPI' : 'Sixoner'} API Key`, requestId })
 
   const auditParams = readParamsAudit(req)
@@ -562,22 +584,22 @@ app.post('/api-proxy/*path', async (req, res) => {
   try {
     let model = gptUpstream.model
     let body
+    let payload = null
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
         body = await readBody(req)
-        const payload = JSON.parse(body.toString('utf8'))
-        payload.model = gptUpstream.model
-        model = gptUpstream.model
+        payload = JSON.parse(body.toString('utf8'))
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求内容必须是 JSON 对象')
         if (!prompt && typeof payload.prompt === 'string') prompt = payload.prompt.trim().slice(0, 5000)
         if (typeof payload.size === 'string') size = payload.size.slice(0, 40)
         if (typeof payload.quality === 'string') quality = payload.quality.slice(0, 40)
         const requestedImageCount = Math.max(1, Number.parseInt(payload.n ?? auditParams.n ?? 1, 10) || 1)
         if (requestedImageCount > 1) return res.status(400).json({ error: '当前服务每次只能生成 1 张图片', requestId })
         if (endpoint.startsWith('/images/')) payload.n = 1
-        body = Buffer.from(JSON.stringify(payload))
       } else {
         body = await readBody(req, 60 * 1024 * 1024)
       }
+      model = getUpstreamModel(gptUpstream, size)
     } catch (error) {
       return res.status(400).json({ error: sanitizeError(error.message), requestId })
     }
@@ -591,6 +613,10 @@ app.post('/api-proxy/*path', async (req, res) => {
 
     try {
       const sendUpstream = (upstream) => {
+        const upstreamModel = getUpstreamModel(upstream, size)
+        const upstreamBody = payload
+          ? Buffer.from(JSON.stringify({ ...payload, model: upstreamModel }))
+          : replaceMultipartTextField(body, 'model', upstreamModel)
         const headers = {
           Authorization: `Bearer ${upstream.apiKey}`,
           Accept: req.headers.accept || 'application/json',
@@ -599,27 +625,35 @@ app.post('/api-proxy/*path', async (req, res) => {
         return fetch(`${upstream.apiUrl}${endpoint}`, {
           method: 'POST',
           headers,
-          body,
+          body: upstreamBody,
           duplex: 'half',
           signal: AbortSignal.timeout(600_000),
         })
       }
+      let upstreamIndex = 0
       let fallbackStatus = null
       let response
-      try {
-        response = await sendUpstream(gptUpstream)
-        if (gptUpstream.channel !== 'primary' && primaryUpstream.apiKey && (gptFallbackStatuses.has(response.status) || response.status >= 500)) {
-          fallbackStatus = response.status
-          await response.body?.cancel()
-          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: 'primary', upstreamStatus: fallbackStatus } })
-          gptUpstream = primaryUpstream
+      while (true) {
+        try {
           response = await sendUpstream(gptUpstream)
+        } catch (error) {
+          const nextUpstream = upstreamChain[upstreamIndex + 1]
+          if (!nextUpstream) throw error
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: nextUpstream.channel, message: sanitizeError(error.message) } })
+          upstreamIndex += 1
+          gptUpstream = nextUpstream
+          model = getUpstreamModel(gptUpstream, size)
+          continue
         }
-      } catch (error) {
-        if (gptUpstream.channel === 'primary' || !primaryUpstream.apiKey) throw error
-        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: 'primary', message: sanitizeError(error.message) } })
-        gptUpstream = primaryUpstream
-        response = await sendUpstream(gptUpstream)
+
+        const nextUpstream = upstreamChain[upstreamIndex + 1]
+        if (!nextUpstream || (!gptFallbackStatuses.has(response.status) && response.status < 500)) break
+        fallbackStatus = response.status
+        await response.body?.cancel()
+        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: nextUpstream.channel, upstreamStatus: fallbackStatus } })
+        upstreamIndex += 1
+        gptUpstream = nextUpstream
+        model = getUpstreamModel(gptUpstream, size)
       }
       res.status(response.status)
       for (const name of ['content-type', 'cache-control']) {
@@ -628,6 +662,7 @@ app.post('/api-proxy/*path', async (req, res) => {
       }
       res.setHeader('X-Request-Id', requestId)
       res.setHeader('X-Image-Upstream', gptUpstream.channel)
+      res.setHeader('X-Image-Model', model)
       if (response.body) {
         await pipeline(Readable.fromWeb(response.body), res)
       } else {
@@ -639,9 +674,9 @@ app.post('/api-proxy/*path', async (req, res) => {
       const status = response.ok ? 'success' : 'failed'
       db.prepare(`
         UPDATE generation_events
-        SET status = ?, upstream_status = ?, duration_ms = ?, completed_at = ?
+        SET model = ?, status = ?, upstream_status = ?, duration_ms = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(status, response.status, durationMs, now(), requestId)
+      `).run(model, status, response.status, durationMs, now(), requestId)
       addLog({
         requestId,
         level: response.ok ? 'info' : 'warn',

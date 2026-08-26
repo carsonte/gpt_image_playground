@@ -601,7 +601,7 @@ export default function AdminApp() {
                     </div>
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                       <GptRouteOption channel="sixoner" name="Sixoner" description="当前默认线路，异常时转入 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
-                      <GptRouteOption channel="catapi" name="CatAPI" description="可选主线路，异常时转入 BlackEngine。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                      <GptRouteOption channel="catapi" name="CatAPI" description="可选主线路，依次回退 Sixoner、BlackEngine。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
                     </div>
                     <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">切换规则：</span>保存后，新提交任务立即使用新线路；正在生成和已经排队的任务继续使用进入队列时的线路，不会中途切换。</div>
                   </fieldset>}

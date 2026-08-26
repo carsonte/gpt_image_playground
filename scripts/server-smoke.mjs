@@ -13,6 +13,7 @@ let maxUpstreamActive = 0
 let upstreamPrompts = []
 let upstreamPayloads = []
 let upstreamPaths = []
+let upstreamBodies = []
 const upstream = createServer(async (req, res) => {
   upstreamPaths.push(req.url)
   const chunks = []
@@ -20,9 +21,11 @@ const upstream = createServer(async (req, res) => {
     req.on('data', (chunk) => chunks.push(chunk))
     req.on('end', resolve)
   })
+  const rawBody = Buffer.concat(chunks)
+  upstreamBodies.push({ path: req.url, text: rawBody.toString('latin1') })
   let payload = null
   try {
-    payload = JSON.parse(Buffer.concat(chunks).toString('utf8'))
+    payload = JSON.parse(rawBody.toString('utf8'))
     if (typeof payload.prompt === 'string') upstreamPrompts.push(payload.prompt)
     upstreamPayloads.push(payload)
   } catch {
@@ -39,7 +42,9 @@ const upstream = createServer(async (req, res) => {
     return
   }
   await new Promise((resolve) => setTimeout(resolve, 120))
-  const status = req.url === '/catapi/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫' ? 502 : 200
+  const shouldFailCatApi = req.url === '/catapi/v1/images/generations' && ['一只戴墨镜的橘猫', 'CatAPI 转 Sixoner 测试'].includes(payload?.prompt)
+  const shouldFailSixoner = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫'
+  const status = shouldFailCatApi || shouldFailSixoner ? 502 : 200
   res.writeHead(status, { 'Content-Type': 'application/json' })
   res.end(JSON.stringify(req.url === '/v1/chat/completions'
     ? { choices: [{ message: { content: '优化后的 U1 信息图提示词，完整保留价格“19.9 元”' } }] }
@@ -64,9 +69,11 @@ const child = spawn(process.execPath, ['server/index.mjs'], {
     SIXONER_API_URL: `http://127.0.0.1:${upstreamPort}/sixoner/v1`,
     SIXONER_API_KEY: 'test-sixoner-key',
     SIXONER_MODEL: 'gpt-image-2',
+    SIXONER_4K_MODEL: 'gpt-image-2-4k',
     CATAPI_API_URL: `http://127.0.0.1:${upstreamPort}/catapi/v1`,
     CATAPI_API_KEY: 'test-catapi-key',
     CATAPI_MODEL: 'gpt-image-2',
+    CATAPI_4K_MODEL: 'gpt-image-2-4k',
     SENSENOVA_API_URL: `http://127.0.0.1:${upstreamPort}/v1`,
     SENSENOVA_API_KEY: 'test-sensenova-key',
     SENSENOVA_CONCURRENCY: '1',
@@ -196,12 +203,14 @@ try {
   const gptImageResult = await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2048x2048', quality: 'high', n: 1 }),
+    body: JSON.stringify({ model: 'test-image-model', prompt: '一只戴墨镜的橘猫', size: '2880x2880', quality: 'high', n: 1 }),
   })
   if (!upstreamPaths.includes('/catapi/v1/images/generations')) throw new Error('GPT 请求未转发到 CatAPI 线路')
-  if (!upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('CatAPI 失败后未自动转发到 BlackEngine 备用线路')
+  if (!upstreamPaths.includes('/sixoner/v1/images/generations') || !upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('CatAPI 和 Sixoner 失败后未自动转发到 BlackEngine 备用线路')
+  const fallbackPayloads = upstreamPayloads.filter((item) => item.prompt === '一只戴墨镜的橘猫')
+  if (fallbackPayloads[0]?.model !== 'gpt-image-2-4k' || fallbackPayloads[1]?.model !== 'gpt-image-2-4k' || fallbackPayloads[2]?.model !== 'gpt-image-2' || gptImageResult.response.headers.get('x-image-model') !== 'gpt-image-2') throw new Error('4K 回退请求未按各渠道模型分别转发')
   const fallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
-  if (fallbackLogs.payload.total !== 1 || fallbackLogs.payload.logs[0]?.details?.upstreamStatus !== 502) throw new Error('GPT 生图回退日志不正确')
+  if (fallbackLogs.payload.total !== 2 || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'catapi' && item.details?.to === 'sixoner') || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'sixoner' && item.details?.to === 'primary')) throw new Error('GPT 生图三级回退日志不正确')
   await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Image-Module': 'sensenova-u1' },
@@ -211,7 +220,7 @@ try {
   if (JSON.stringify(senseNovaPayload) !== JSON.stringify({ model: 'sensenova-u1-fast', prompt: 'U1 信息图测试', size: '2048x2048', n: 1, watermark: false })) throw new Error('U1 请求未按官方参数转发')
   const summary = await request('/api/admin/stats/summary?period=7d', { headers: { Cookie: cookie } })
   if (summary.payload.visits !== 1 || summary.payload.uniqueIps !== 1) throw new Error('访问统计结果不正确')
-  if (summary.payload.requests !== 2 || summary.payload.images !== 2 || summary.payload.resolutions[0]?.tier !== '2K') throw new Error('生图与分辨率统计结果不正确')
+  if (summary.payload.requests !== 2 || summary.payload.images !== 2 || !summary.payload.resolutions.some((item) => item.tier === '4K') || !summary.payload.resolutions.some((item) => item.tier === '2K')) throw new Error('生图与分辨率统计结果不正确')
   if (!summary.payload.modules.some((item) => item.module === 'sensenova-u1' && item.requests === 1)) throw new Error('U1 独立统计结果不正确')
   if (!Number.isFinite(summary.payload.averageDurationMs) || summary.payload.averageDurationMs < 100) throw new Error('平均完成耗时统计结果不正确')
   if (summary.payload.promptOptimization?.requests !== 1 || summary.payload.promptOptimization.successful !== 1 || summary.payload.promptOptimization.failed !== 0 || summary.payload.promptOptimization.uniqueIps !== 1 || !Number.isFinite(summary.payload.promptOptimization.averageDurationMs)) throw new Error('提示词优化用量统计结果不正确')
@@ -249,6 +258,39 @@ try {
   await deliveryResponse.json()
   const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')
+
+  const catApi4kResult = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'wrong-model', prompt: 'CatAPI 4K 模型路由测试', size: '2880x2880', n: 1 }),
+  })
+  const catApi4kPayload = upstreamPayloads.find((item) => item.prompt === 'CatAPI 4K 模型路由测试')
+  if (catApi4kPayload?.model !== 'gpt-image-2-4k' || catApi4kResult.response.headers.get('x-image-model') !== 'gpt-image-2-4k') throw new Error('CatAPI 4K 请求未使用专用模型')
+
+  const sixonerFallbackResult = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model: 'wrong-model', prompt: 'CatAPI 转 Sixoner 测试', size: '2880x2880', n: 1 }),
+  })
+  const sixonerFallbackPayloads = upstreamPayloads.filter((item) => item.prompt === 'CatAPI 转 Sixoner 测试')
+  if (sixonerFallbackPayloads.length !== 2 || sixonerFallbackPayloads.some((item) => item.model !== 'gpt-image-2-4k') || sixonerFallbackResult.response.headers.get('x-image-upstream') !== 'sixoner') throw new Error('CatAPI 失败后未优先回退到 Sixoner 4K 模型')
+
+  const editForm = new FormData()
+  editForm.append('model', 'wrong-model')
+  editForm.append('prompt', 'CatAPI 4K 编辑模型路由测试')
+  editForm.append('size', '2880x2880')
+  editForm.append('n', '1')
+  editForm.append('image[]', new Blob(['test-image'], { type: 'image/png' }), 'test.png')
+  await request('/api-proxy/images/edits', {
+    method: 'POST',
+    headers: {
+      'X-Image-Prompt-B64': Buffer.from('CatAPI 4K 编辑模型路由测试').toString('base64'),
+      'X-Image-Params-B64': Buffer.from(JSON.stringify({ size: '2880x2880', n: 1 })).toString('base64'),
+    },
+    body: editForm,
+  })
+  const edit4kBody = upstreamBodies.findLast((item) => item.path === '/catapi/v1/images/edits')?.text ?? ''
+  if (!edit4kBody.includes('name="model"\r\n\r\ngpt-image-2-4k\r\n')) throw new Error('CatAPI 4K 编辑请求未使用专用模型')
 
   const usage = await request('/api/admin/ip-usage?period=30d', { headers: { Cookie: cookie } })
   const localIp = usage.payload.items.find((item) => item.ipAddress === '127.0.0.1')
@@ -360,7 +402,7 @@ try {
   if (!observedLiveIp) throw new Error('实时任务未显示真实 IP')
   if (upstreamPrompts.join(',') !== '队列测试一,队列测试二') throw new Error('全站生图请求未按提交顺序执行')
 
-  const logs = await request('/api/admin/logs?limit=20', { headers: { Cookie: cookie } })
+  const logs = await request('/api/admin/logs?limit=100', { headers: { Cookie: cookie } })
   if (!logs.payload.logs.some((item) => item.event === 'announcement.publish')) throw new Error('公告发布日志缺失')
   const clearedGenerations = await request('/api/admin/generations', { method: 'DELETE', headers: { Cookie: cookie, Origin: origin } })
   if (clearedGenerations.payload.deleted < 1) throw new Error('清空生成记录未删除数据')
