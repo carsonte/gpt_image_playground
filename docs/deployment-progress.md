@@ -6,19 +6,19 @@
 
 - 应用版本：`v0.7.6`
 - 当前发布分支：`main`
-- 当前生产基线提交：`b642c83 fix: route 2K requests to dedicated models`
+- 当前功能发布提交：`c9f5c00 feat: clarify image routing and lock PNG output`
 - 定制仓库：`https://github.com/carsonte/gpt_image_playground.git`
 - 官方上游：`https://github.com/CookSleep/gpt_image_playground.git`
 - 官方 `v0.7.6` 已完成差异检查、冲突处理、完整验证、推送和生产部署。
 
-## 2026-08-28 本地待发布更新
+## 2026-08-28 更新
 
 - 首页格式选择已锁定为 PNG；旧浏览器中的 JPEG/WebP 参数会自动归一为 PNG，服务端也会强制改写新生图请求。
 - 1K 使用通用 `gpt-image-2`，2K 使用 `gpt-image-2-2k`，4K 使用 `gpt-image-2-4k`。
 - 2K 固定路由为 `CatAPI → Sixoner → BlackEngine`；1K/4K 继续跟随后台选择的主线路。
 - 实测 CatAPI 与 Sixoner 的 `gpt-image-2-4k` 均可返回 3840×2160 PNG；通用 `gpt-image-2` 无法保证 4K。
 - 后台系统设置已拆分为“实际生图路由”和“1K/4K 主线路”，明确标记固定规则与可调整规则。
-- 上述本地改动已通过 515 项测试、服务器冒烟测试和生产构建，尚未提交 Git 或部署服务器。
+- 上述更新已通过 515 项测试、服务器冒烟测试和生产构建，并纳入本次正式发布。
 
 ## 2026-08-22 更新
 
