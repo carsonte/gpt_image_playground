@@ -105,6 +105,8 @@ type LogItem = {
   createdAt: string
 }
 
+type LogView = 'all' | 'errors'
+
 type IpUsage = {
   ipAddress: string
   visits: number
@@ -158,6 +160,28 @@ const CHANNEL_NAMES: Record<string, string> = {
 function formatRoutePath(value: string) {
   if (!value) return '等待分配'
   return value.split('→').map((item) => CHANNEL_NAMES[item.trim()] ?? item.trim()).join(' → ')
+}
+
+const LOG_EVENT_NAMES: Record<string, string> = {
+  'image.proxy': '图片服务返回失败',
+  'image.proxy_error': '图片服务连接失败',
+  'prompt.optimize_error': '提示词优化失败',
+  'server.unhandled': '服务器未处理异常',
+  'admin.login_failed': '后台登录失败',
+}
+
+function logErrorMessage(item: LogItem) {
+  const message = item.details.message
+  if (typeof message === 'string' && message.trim()) return message
+  const upstreamStatus = item.details.upstreamStatus
+  if (typeof upstreamStatus === 'number' || typeof upstreamStatus === 'string') return `上游服务返回 HTTP ${upstreamStatus}`
+  return '未记录到具体错误信息，请根据请求 ID 检查同时间段日志。'
+}
+
+function logSource(item: LogItem) {
+  const channel = typeof item.details.channel === 'string' ? CHANNEL_NAMES[item.details.channel] ?? item.details.channel : ''
+  const model = typeof item.details.model === 'string' ? item.details.model : ''
+  return [channel, model].filter(Boolean).join(' · ') || (item.type === 'security' ? '安全模块' : item.type === 'admin' ? '管理后台' : '应用服务器')
 }
 
 function localDate(value: string | null) {
@@ -242,6 +266,9 @@ export default function AdminApp() {
   const [logs, setLogs] = useState<LogItem[]>([])
   const [optimizationLogs, setOptimizationLogs] = useState<LogItem[]>([])
   const [logType, setLogType] = useState('')
+  const [logView, setLogView] = useState<LogView>('all')
+  const [logTotal, setLogTotal] = useState(0)
+  const [errorLogTotal, setErrorLogTotal] = useState(0)
   const [ipUsage, setIpUsage] = useState<IpUsage[]>([])
   const [ipBlocks, setIpBlocks] = useState<IpBlock[]>([])
   const [dailyTrend, setDailyTrend] = useState<DailyTrend[]>([])
@@ -292,7 +319,16 @@ export default function AdminApp() {
     setSiteSettings(nextSiteSettings)
   })
   const loadAnnouncements = () => apiRequest<{ announcements: Announcement[] }>('/api/admin/announcements').then((result) => setAnnouncements(result.announcements))
-  const loadLogs = () => apiRequest<{ logs: LogItem[] }>(`/api/admin/logs?limit=100${logType ? `&type=${encodeURIComponent(logType)}` : ''}`).then((result) => setLogs(result.logs))
+  const loadLogs = () => {
+    const type = logType ? `&type=${encodeURIComponent(logType)}` : ''
+    const current = apiRequest<{ total: number; logs: LogItem[] }>(`/api/admin/logs?limit=100${type}${logView === 'errors' ? '&errors=1' : ''}`)
+    const errors = apiRequest<{ total: number }>('/api/admin/logs?limit=1&errors=1')
+    return Promise.all([current, errors]).then(([result, errorResult]) => {
+      setLogs(result.logs)
+      setLogTotal(result.total)
+      setErrorLogTotal(errorResult.total)
+    })
+  }
   const loadOptimization = () => Promise.all([
     loadDashboard(),
     apiRequest<{ logs: LogItem[] }>('/api/admin/logs?limit=200&eventPrefix=prompt.optimize').then((result) => setOptimizationLogs(result.logs)),
@@ -371,7 +407,7 @@ export default function AdminApp() {
     setError('')
     const action = tab === 'dashboard' ? Promise.all([loadDashboard(), loadLiveQueue()]) : tab === 'live' ? loadLiveQueue() : tab === 'settings' ? loadSettings() : tab === 'generations' ? loadGenerations() : tab === 'optimization' ? loadOptimization() : tab === 'announcements' ? loadAnnouncements() : tab === 'ips' ? loadIps() : loadLogs()
     void action.catch((err) => setError(err.message))
-  }, [authenticated, tab, logType, generationIp, generationQuery, generationDateFrom, generationDateTo, generationModule])
+  }, [authenticated, tab, logType, logView, generationIp, generationQuery, generationDateFrom, generationDateTo, generationModule])
 
   useEffect(() => {
     if (!authenticated || (tab !== 'dashboard' && tab !== 'live')) return
@@ -817,8 +853,28 @@ export default function AdminApp() {
 
           {tab === 'logs' && (
             <section>
-              <div className="mb-4 flex flex-wrap items-end justify-between gap-3"><div><h1 className="text-2xl font-bold">日志中心</h1><p className="mt-1 text-sm text-gray-500">日志不记录 Key、提示词或图片；真实 IP 仅在“IP 管理”中展示。</p></div><label className="text-sm">类型<select value={logType} onChange={(e) => setLogType(e.target.value)} className={`${fieldClass()} mt-1 w-40`}><option value="">全部</option><option value="admin">管理操作</option><option value="request">图片请求</option><option value="system">系统错误</option><option value="security">安全事件</option></select></label></div>
-              <div className="overflow-x-auto rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900"><table className="min-w-full text-left text-sm"><thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03]"><tr>{['时间', '级别', '类型', '事件', '状态', '耗时', '请求 ID'].map((item) => <th key={item} className="px-4 py-3 font-medium">{item}</th>)}</tr></thead><tbody className="divide-y divide-gray-100 dark:divide-white/[0.06]">{logs.map((item) => <tr key={item.id}><td className="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{localDate(item.createdAt)}</td><td className="px-4 py-3">{item.level}</td><td className="px-4 py-3">{item.type}</td><td className="px-4 py-3 font-mono text-xs">{item.event}</td><td className="px-4 py-3">{item.status || '—'}</td><td className="px-4 py-3">{formatDuration(item.durationMs)}</td><td className="max-w-[160px] truncate px-4 py-3 font-mono text-xs text-gray-500" title={item.requestId}>{item.requestId || '—'}</td></tr>)}</tbody></table>{!logs.length && <div className="p-10 text-center text-sm text-gray-500">暂无日志</div>}</div>
+              <div className="mb-5 flex flex-wrap items-end justify-between gap-4">
+                <div><h1 className="text-2xl font-bold">日志中心</h1><p className="mt-1 text-sm text-gray-500">报错记录单独汇总失败请求；日志不记录 Key、提示词或图片。</p></div>
+                <label className="text-sm">类型<select value={logType} onChange={(e) => setLogType(e.target.value)} className={`${fieldClass()} mt-1 w-40`}><option value="">全部</option><option value="admin">管理操作</option><option value="request">图片请求</option><option value="system">系统错误</option><option value="security">安全事件</option></select></label>
+              </div>
+              <div className="mb-4 flex min-h-11 w-fit items-center gap-1 rounded-xl bg-gray-200/70 p-1 dark:bg-white/[0.06]">
+                <button type="button" aria-pressed={logView === 'all'} onClick={() => setLogView('all')} className={`min-h-9 rounded-lg px-4 text-sm font-medium transition ${logView === 'all' ? 'bg-white text-gray-900 shadow-sm dark:bg-white/[0.1] dark:text-white' : 'text-gray-500 hover:text-gray-800 dark:hover:text-gray-200'}`}>全部日志</button>
+                <button type="button" aria-pressed={logView === 'errors'} onClick={() => setLogView('errors')} className={`min-h-9 rounded-lg px-4 text-sm font-medium transition ${logView === 'errors' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-red-600 dark:hover:text-red-300'}`}>报错记录 <span className="ml-1 tabular-nums">{errorLogTotal}</span></button>
+              </div>
+              {logView === 'errors' ? (
+                <div className="overflow-x-auto rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900">
+                  <table className="min-w-[960px] text-left text-sm">
+                    <thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03]"><tr>{['时间', '报错内容', '来源 / 模型', '耗时', 'IP 标识', '请求 ID'].map((item) => <th key={item} className="px-4 py-3 font-medium">{item}</th>)}</tr></thead>
+                    <tbody className="divide-y divide-gray-100 dark:divide-white/[0.06]">
+                      {logs.map((item) => <tr key={item.id} className="align-top"><td className="whitespace-nowrap px-4 py-4 text-xs text-gray-500">{localDate(item.createdAt)}</td><td className="max-w-xl px-4 py-4"><div className="font-semibold text-red-700 dark:text-red-300">{LOG_EVENT_NAMES[item.event] ?? item.event}</div><div data-selectable-text className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-gray-600 dark:text-gray-300">{logErrorMessage(item)}</div></td><td className="whitespace-nowrap px-4 py-4 text-xs text-gray-600 dark:text-gray-300">{logSource(item)}</td><td className="whitespace-nowrap px-4 py-4 tabular-nums text-gray-500">{formatDuration(item.durationMs)}</td><td className="whitespace-nowrap px-4 py-4 font-mono text-xs text-gray-500">{item.ipHash || '—'}</td><td className="max-w-[180px] truncate px-4 py-4 font-mono text-xs text-gray-500" title={item.requestId}>{item.requestId || '—'}</td></tr>)}
+                    </tbody>
+                    {!logs.length && <caption className="caption-bottom p-10 text-center text-sm text-gray-500">暂无报错记录</caption>}
+                  </table>
+                </div>
+              ) : (
+                <div className="overflow-x-auto rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900"><table className="min-w-full text-left text-sm"><thead className="border-b border-gray-200 bg-gray-50 text-xs text-gray-500 dark:border-white/[0.08] dark:bg-white/[0.03]"><tr>{['时间', '级别', '类型', '事件', '状态', '耗时', '请求 ID'].map((item) => <th key={item} className="px-4 py-3 font-medium">{item}</th>)}</tr></thead><tbody className="divide-y divide-gray-100 dark:divide-white/[0.06]">{logs.map((item) => <tr key={item.id}><td className="whitespace-nowrap px-4 py-3 text-xs text-gray-500">{localDate(item.createdAt)}</td><td className="px-4 py-3">{item.level}</td><td className="px-4 py-3">{item.type}</td><td className="px-4 py-3 font-mono text-xs">{item.event}</td><td className="px-4 py-3">{item.status || '—'}</td><td className="px-4 py-3">{formatDuration(item.durationMs)}</td><td className="max-w-[160px] truncate px-4 py-3 font-mono text-xs text-gray-500" title={item.requestId}>{item.requestId || '—'}</td></tr>)}</tbody></table>{!logs.length && <div className="p-10 text-center text-sm text-gray-500">暂无日志</div>}</div>
+              )}
+              <div className="mt-3 text-xs text-gray-400">当前筛选共 {logTotal} 条；真实 IP 请通过请求 ID 到“生成记录”或“IP 管理”核对。</div>
             </section>
           )}
         </main>

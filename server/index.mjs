@@ -731,7 +731,13 @@ app.post('/api-proxy/*path', async (req, res) => {
       res.setHeader('X-Request-Id', requestId)
       res.setHeader('X-Image-Upstream', gptUpstream.channel)
       res.setHeader('X-Image-Model', model)
-      if (response.body) {
+      const errorBody = response.ok ? null : Buffer.from(await response.arrayBuffer())
+      const errorSummary = errorBody ? sanitizeError(errorBody.toString('utf8')) : ''
+      if (errorBody) {
+        const delivered = finished(res)
+        res.end(errorBody)
+        await delivered
+      } else if (response.body) {
         await pipeline(Readable.fromWeb(response.body), res)
       } else {
         const delivered = finished(res)
@@ -742,18 +748,18 @@ app.post('/api-proxy/*path', async (req, res) => {
       const status = response.ok ? 'success' : 'failed'
       db.prepare(`
         UPDATE generation_events
-        SET model = ?, upstream_channel = ?, route_path = ?, status = ?, upstream_status = ?, duration_ms = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(model, gptUpstream.channel, routePath, status, response.status, durationMs, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, status, response.status, durationMs, errorSummary, now(), requestId)
       addLog({
         requestId,
-        level: response.ok ? 'info' : 'warn',
+        level: response.ok ? 'info' : 'error',
         type: 'request',
         event: 'image.proxy',
         ipHash,
         status,
         durationMs,
-        details: { endpoint, model, imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, queueWaitMs: slot.waitedMs },
+        details: { endpoint, model, imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, queueWaitMs: slot.waitedMs, ...(errorSummary ? { message: errorSummary } : {}) },
       })
     } catch (error) {
       const durationMs = Date.now() - startedAt
@@ -1508,6 +1514,9 @@ app.get('/api/admin/logs', (req, res) => {
   if (eventPrefix) {
     conditions.push('event LIKE ?')
     params.push(`${eventPrefix}%`)
+  }
+  if (req.query.errors === '1' || req.query.errors === 'true') {
+    conditions.push("(level = 'error' OR status = 'failed')")
   }
   const limit = Math.max(1, Math.min(200, Number.parseInt(req.query.limit ?? 50, 10) || 50))
   const offset = Math.max(0, Number.parseInt(req.query.offset ?? 0, 10) || 0)

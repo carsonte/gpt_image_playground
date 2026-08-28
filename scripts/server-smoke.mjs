@@ -44,9 +44,12 @@ const upstream = createServer(async (req, res) => {
   await new Promise((resolve) => setTimeout(resolve, 120))
   const shouldFailCatApi = req.url === '/catapi/v1/images/generations' && ['一只戴墨镜的橘猫', 'CatAPI 转 Sixoner 测试'].includes(payload?.prompt)
   const shouldFailSixoner = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫'
-  const status = shouldFailCatApi || shouldFailSixoner ? 502 : 200
+  const shouldFailAll = payload?.prompt === '全部线路失败测试' && req.url?.endsWith('/images/generations')
+  const status = shouldFailCatApi || shouldFailSixoner || shouldFailAll ? 502 : 200
   res.writeHead(status, { 'Content-Type': 'application/json' })
-  res.end(JSON.stringify(req.url === '/v1/chat/completions'
+  res.end(JSON.stringify(shouldFailAll
+    ? { error: { message: '模拟上游故障' } }
+    : req.url === '/v1/chat/completions'
     ? { choices: [{ message: { content: '优化后的 U1 信息图提示词，完整保留价格“19.9 元”' } }] }
     : { data: [] }))
   upstreamActive -= 1
@@ -249,6 +252,20 @@ try {
   if (future.payload.items.length !== 0) throw new Error('生成记录日期筛选结果不正确')
   const keywords = await request('/api/admin/stats/keywords?period=30d', { headers: { Cookie: cookie } })
   if (!keywords.payload.keywords.some((item) => item.keyword === '橘猫' && item.count === 1)) throw new Error('热门关键词统计结果不正确')
+
+  const failedResponse = await fetch(`${origin}/api-proxy/images/generations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '全部线路失败测试', size: '2880x2880', n: 1 }),
+  })
+  if (failedResponse.status !== 502) throw new Error('全部线路失败时未返回最终上游错误')
+  const failedPayload = await failedResponse.json()
+  if (failedPayload.error?.message !== '模拟上游故障') throw new Error('最终上游错误内容未完整返回浏览器')
+  const errorLogs = await request('/api/admin/logs?errors=1&limit=20', { headers: { Cookie: cookie } })
+  const errorLog = errorLogs.payload.logs.find((item) => item.requestId === failedResponse.headers.get('x-request-id'))
+  if (errorLog?.event !== 'image.proxy' || errorLog?.status !== 'failed' || errorLog?.details?.message !== '{"error":{"message":"模拟上游故障"}}') throw new Error('独立报错记录未保存最终上游错误')
+  const failedGeneration = await request('/api/admin/generations?q=全部线路失败测试', { headers: { Cookie: cookie } })
+  if (failedGeneration.payload.items[0]?.status !== 'failed' || !failedGeneration.payload.items[0]?.errorSummary.includes('模拟上游故障')) throw new Error('生成失败记录未保存错误摘要')
 
   await request('/api-proxy/images/generations', {
     method: 'POST',
