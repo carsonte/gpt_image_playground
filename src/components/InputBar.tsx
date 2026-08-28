@@ -7,7 +7,8 @@ import { getActiveApiProfile, getAgentImageApiProfile, normalizeSettings, valida
 import { ensureImageCached, getCachedImage } from '../lib/imageCache'
 import { DEFAULT_FAL_IMAGE_SIZE, getChangedParams, getOutputImageLimitForSettings, normalizeParamsForSettings } from '../lib/paramCompatibility'
 import { getAtImageQuery, getImageMentionLabel, getPromptIndexFromVisibleIndex, getPromptMentionParts, getSelectedImageMentionLabel, imageMentionMatches, insertImageMentionAtVisibleRange, insertTextMentionAtVisibleRange, isCursorInSelectedImageMention, stripImageMentionMarkers } from '../lib/promptImageMentions'
-import { normalizeCodexCliImageSize, normalizeImageSize } from '../lib/size'
+import { DEFAULT_MANAGED_GPT_SIZE, normalizeCodexCliImageSize, normalizeImageSize, normalizeManagedGptSize } from '../lib/size'
+import { isServerManagedApi } from '../lib/serverManagedApi'
 import { createMaskPreviewDataUrl } from '../lib/canvasImage'
 import { getSafeBoundingClientRect } from '../lib/domRect'
 import { collectAgentRoundOutputImageSlots } from '../lib/agentImageReferences'
@@ -444,6 +445,12 @@ export default function InputBar() {
     : '请先配置 API'
   const submitTooltipText = activeAgentIsRunning ? '停止生成' : '尚未完成 API 配置，请在右上角设置中进行'
   const senseNovaU1 = getProfileImageModule(activeProfile) === 'sensenova-u1'
+  const managedGpt = isServerManagedApi() && !senseNovaU1
+  useEffect(() => {
+    if (!managedGpt) return
+    const size = normalizeManagedGptSize(params.size)
+    if (size !== params.size) setParams({ size })
+  }, [managedGpt, params.size, setParams])
   const promptPlaceholder = senseNovaU1 ? '描述你想制作的信息图、海报或知识卡片...' : '描述你想生成的图片，可输入 @ 来指定参考图...'
   const optimizePrompt = useCallback(async () => {
     const sourcePrompt = prompt.trim()
@@ -1610,11 +1617,13 @@ export default function InputBar() {
           />
         ) : (
           <SizePickerModal
-            currentSize={isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
+            currentSize={managedGpt ? normalizeManagedGptSize(params.size || DEFAULT_MANAGED_GPT_SIZE) : isFalTextToImage && params.size === 'auto' ? DEFAULT_FAL_IMAGE_SIZE : params.size}
             onSelect={(size) => setParams({ size })}
             onClose={() => setShowSizePicker(false)}
-            allowAuto={!isFalTextToImage}
+            allowAuto={!managedGpt && !isFalTextToImage}
             codexCli={activeProfile.codexCli}
+            tiers={managedGpt ? ['2K', '4K'] : undefined}
+            ratioOnly={managedGpt}
           />
         )
       )}

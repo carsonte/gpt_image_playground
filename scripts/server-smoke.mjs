@@ -213,6 +213,11 @@ try {
   if (fallbackPayloads[0]?.model !== 'gpt-image-2-4k' || fallbackPayloads[1]?.model !== 'gpt-image-2-4k' || fallbackPayloads[2]?.model !== 'gpt-image-2' || gptImageResult.response.headers.get('x-image-model') !== 'gpt-image-2') throw new Error('4K 回退请求未按各渠道模型分别转发')
   const fallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
   if (fallbackLogs.payload.total !== 2 || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'catapi' && item.details?.to === 'sixoner') || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'sixoner' && item.details?.to === 'primary')) throw new Error('GPT 生图三级回退日志不正确')
+  await request('/api/generation-result', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId: gptImageResult.response.headers.get('x-request-id'), outputSize: '1024x1536' }),
+  })
   await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Image-Module': 'sensenova-u1' },
@@ -235,12 +240,23 @@ try {
   if (generations.payload.items[0]?.prompt !== 'U1 信息图测试' || generations.payload.items[0]?.module !== 'sensenova-u1') throw new Error('U1 提示词审计或模块记录不正确')
   const gptGenerations = await request('/api/admin/generations?module=gpt', { headers: { Cookie: cookie } })
   if (gptGenerations.payload.items[0]?.prompt !== '一只戴墨镜的橘猫' || gptGenerations.payload.items[0]?.model !== 'gpt-image-2') throw new Error('GPT 模块筛选结果不正确')
+  if (gptGenerations.payload.items[0]?.upstreamChannel !== 'primary' || gptGenerations.payload.items[0]?.routePath !== 'catapi → sixoner → primary') throw new Error('GPT 实际线路记录不正确')
+  if (gptGenerations.payload.items[0]?.size !== '2880x2880' || gptGenerations.payload.items[0]?.resolutionTier !== '4K' || gptGenerations.payload.items[0]?.outputSize !== '1024x1536' || gptGenerations.payload.items[0]?.outputResolutionTier !== '1K') throw new Error('GPT 输入和实际输出尺寸记录不正确')
+  if (gptGenerations.payload.items[0]?.status !== 'success' || !Number.isFinite(gptGenerations.payload.items[0]?.durationMs)) throw new Error('GPT 状态和耗时记录不正确')
   const searched = await request('/api/admin/generations?q=墨镜', { headers: { Cookie: cookie } })
   if (searched.payload.items.length !== 1) throw new Error('生成记录文字搜索结果不正确')
   const future = await request('/api/admin/generations?dateFrom=2999-01-01T00:00:00.000Z', { headers: { Cookie: cookie } })
   if (future.payload.items.length !== 0) throw new Error('生成记录日期筛选结果不正确')
   const keywords = await request('/api/admin/stats/keywords?period=30d', { headers: { Cookie: cookie } })
   if (!keywords.payload.keywords.some((item) => item.keyword === '橘猫' && item.count === 1)) throw new Error('热门关键词统计结果不正确')
+
+  await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '旧客户端 1K 升级测试', size: '1024x1536', n: 1 }),
+  })
+  const promotedPayload = upstreamPayloads.find((item) => item.prompt === '旧客户端 1K 升级测试')
+  if (promotedPayload?.size !== '1440x2160' || promotedPayload?.model !== 'gpt-image-2-2k') throw new Error('旧客户端 1K 请求未升级为对应比例的 2K')
 
   const deliveryRequest = fetch(`${origin}/api-proxy/images/generations`, {
     method: 'POST',
@@ -302,18 +318,24 @@ try {
   editForm.append('model', 'wrong-model')
   editForm.append('prompt', 'CatAPI 4K 编辑模型路由测试')
   editForm.append('size', '2880x2880')
-  editForm.append('n', '1')
+  editForm.append('output_format', 'webp')
   editForm.append('image[]', new Blob(['test-image'], { type: 'image/png' }), 'test.png')
   await request('/api-proxy/images/edits', {
     method: 'POST',
     headers: {
+      'X-Image-Action': 'edit',
       'X-Image-Prompt-B64': Buffer.from('CatAPI 4K 编辑模型路由测试').toString('base64'),
-      'X-Image-Params-B64': Buffer.from(JSON.stringify({ size: '2880x2880', n: 1 })).toString('base64'),
+      'X-Image-Params-B64': Buffer.from(JSON.stringify({ size: '2880x2880', output_format: 'webp', n: 1 })).toString('base64'),
     },
     body: editForm,
   })
   const edit4kBody = upstreamBodies.findLast((item) => item.path === '/catapi/v1/images/edits')?.text ?? ''
   if (!edit4kBody.includes('name="model"\r\n\r\ngpt-image-2-4k\r\n')) throw new Error('CatAPI 4K 编辑请求未使用专用模型')
+  if (!edit4kBody.includes('name="output_format"\r\n\r\npng\r\n') || edit4kBody.includes('name="output_format"\r\n\r\nwebp\r\n')) throw new Error('GPT 编辑请求未强制使用 PNG')
+  if (!edit4kBody.includes('name="n"\r\n\r\n1\r\n')) throw new Error('GPT 编辑请求未强制使用单张输出')
+  if (!edit4kBody.includes('name="image[]"; filename="test.png"')) throw new Error('GPT 编辑请求未携带输入图片')
+  const editGeneration = await request('/api/admin/generations?q=CatAPI%204K%20编辑模型路由测试', { headers: { Cookie: cookie } })
+  if (editGeneration.payload.items[0]?.action !== 'edit' || editGeneration.payload.items[0]?.endpoint !== '/images/edits') throw new Error('GPT 编辑请求未被后台识别为编辑图片')
 
   const usage = await request('/api/admin/ip-usage?period=30d', { headers: { Cookie: cookie } })
   const localIp = usage.payload.items.find((item) => item.ipAddress === '127.0.0.1')

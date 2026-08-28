@@ -138,6 +138,7 @@ describe('callImageApi', () => {
     const [, init] = fetchMock.mock.calls.find(([, request]) => (request as RequestInit | undefined)?.body instanceof FormData)!
     const body = (init as RequestInit).body as FormData
     expect(body.get('background')).toBe('transparent')
+    expect(body.get('n')).toBe('1')
   })
 
   it('requests a transparent background from the Responses API image tool', async () => {
@@ -505,7 +506,12 @@ describe('callImageApi', () => {
     ].join('\n')
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
       status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'X-Request-Id': '83ec92b4-f1dc-46f9-af36-2e0f6402804e',
+        'X-Image-Upstream': 'catapi',
+        'X-Image-Model': 'gpt-image-2-2k',
+      },
     }))
 
     const result = await callImageApi({
@@ -537,6 +543,9 @@ describe('callImageApi', () => {
         size: '1024x1536',
       }],
       revisedPrompts: ['rewritten'],
+      requestId: '83ec92b4-f1dc-46f9-af36-2e0f6402804e',
+      upstreamChannel: 'catapi',
+      upstreamModel: 'gpt-image-2-2k',
     })
   })
 

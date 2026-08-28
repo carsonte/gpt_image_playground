@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { calculateImageSize, normalizeCodexCliImageSize, prependCodexCliSizePrompt, stripInjectedCodexCliSizePrompt } from './size'
+import { calculateImageSize, normalizeCodexCliImageSize, normalizeManagedGptSize, prependCodexCliSizePrompt, stripInjectedCodexCliSizePrompt } from './size'
 
 describe('calculateImageSize', () => {
   it('uses common 16:9 display resolutions for the built-in tiers', () => {
@@ -44,5 +44,18 @@ describe('Codex CLI size compatibility', () => {
     expect(stripInjectedCodexCliSizePrompt('Generate at 2048x2048 resolution. Draw a cat.', 'Draw a cat.', '1024x1024')).toBe('Generate at 2048x2048 resolution. Draw a cat.')
     expect(stripInjectedCodexCliSizePrompt('Generate at 1024x1024 resolution. Draw a cat.', 'Generate at 1024x1024 resolution. Draw a cat.', '1024x1024')).toBe('Generate at 1024x1024 resolution. Draw a cat.')
     expect(stripInjectedCodexCliSizePrompt('Generate at 1024x1024 resolution. Draw a cat.', 'Draw a cat.', 'auto')).toBe('Generate at 1024x1024 resolution. Draw a cat.')
+  })
+})
+
+describe('managed GPT size compatibility', () => {
+  it('defaults missing sizes to 2K and promotes common 1K ratios', () => {
+    expect(normalizeManagedGptSize('auto')).toBe('2048x2048')
+    expect(normalizeManagedGptSize('1024x1536')).toBe('1440x2160')
+    expect(normalizeManagedGptSize('1280x720')).toBe('2560x1440')
+  })
+
+  it('preserves 2K and 4K sizes', () => {
+    expect(normalizeManagedGptSize('2048x1536')).toBe('2048x1536')
+    expect(normalizeManagedGptSize('2880x2880')).toBe('2880x2880')
   })
 })

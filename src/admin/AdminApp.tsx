@@ -133,14 +133,31 @@ type GenerationRecord = {
   module: 'gpt' | 'sensenova-u1'
   action: 'generate' | 'edit'
   model: string
+  upstreamChannel: string
+  routePath: string
   prompt: string
   size: string
   resolutionTier: string
+  outputSize: string
+  outputResolutionTier: string
   quality: string
   imageCount: number
   status: 'started' | 'success' | 'failed'
   durationMs: number | null
+  errorSummary: string
   createdAt: string
+}
+
+const CHANNEL_NAMES: Record<string, string> = {
+  primary: 'BlackEngine',
+  sixoner: 'Sixoner',
+  catapi: 'CatAPI',
+  sensenova: 'SenseNova',
+}
+
+function formatRoutePath(value: string) {
+  if (!value) return '等待分配'
+  return value.split('→').map((item) => CHANNEL_NAMES[item.trim()] ?? item.trim()).join(' → ')
 }
 
 function localDate(value: string | null) {
@@ -603,7 +620,6 @@ export default function AdminApp() {
                     </div>
                     <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/[0.08]">
                       {[
-                        { tier: '1K', model: 'gpt-image-2', route: queueSettings.gptChannel === 'catapi' ? 'CatAPI → Sixoner → BlackEngine' : 'Sixoner → BlackEngine', fixed: false },
                         { tier: '2K', model: 'gpt-image-2-2k', route: queueSettings.catApiConfigured ? 'CatAPI → Sixoner → BlackEngine' : 'CatAPI 未配置，暂时沿用可用线路', fixed: queueSettings.catApiConfigured },
                         { tier: '4K', model: 'gpt-image-2-4k', route: queueSettings.gptChannel === 'catapi' ? 'CatAPI → Sixoner → BlackEngine' : 'Sixoner → BlackEngine', fixed: false },
                       ].map((item, idx) => (
@@ -618,14 +634,14 @@ export default function AdminApp() {
                       ))}
                     </div>
                     <div className="mt-6">
-                      <h3 className="text-sm font-semibold">1K / 4K 主线路</h3>
-                      <p className="mt-1 text-xs leading-5 text-gray-500">这里只影响 1K 和 4K；2K 始终优先 CatAPI，不受此选项影响。</p>
+                      <h3 className="text-sm font-semibold">4K 主线路</h3>
+                      <p className="mt-1 text-xs leading-5 text-gray-500">这里只影响 4K；2K 始终优先 CatAPI，不受此选项影响。</p>
                     </div>
                     <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <GptRouteOption channel="sixoner" name="Sixoner 主线路" route="Sixoner → BlackEngine" description="适用于 1K/4K；Sixoner 异常时回退 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
-                      <GptRouteOption channel="catapi" name="CatAPI 主线路" route="CatAPI → Sixoner → BlackEngine" description="适用于 1K/4K；按顺序自动回退两条备用线路。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                      <GptRouteOption channel="sixoner" name="Sixoner 主线路" route="Sixoner → BlackEngine" description="适用于 4K；Sixoner 异常时回退 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                      <GptRouteOption channel="catapi" name="CatAPI 主线路" route="CatAPI → Sixoner → BlackEngine" description="适用于 4K；按顺序自动回退两条备用线路。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
                     </div>
-                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">生效时间：</span>保存后只影响新提交的 1K/4K 任务；正在生成和已经排队的任务不会中途换线。</div>
+                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">生效时间：</span>保存后只影响新提交的 4K 任务；正在生成和已经排队的任务不会中途换线。</div>
                   </fieldset>}
 
                   <div className="mt-7 border-t border-gray-100 pt-6 dark:border-white/[0.06]">
@@ -680,9 +696,16 @@ export default function AdminApp() {
               <div className="max-h-[calc(100vh-270px)] min-h-64 space-y-3 overflow-y-auto overscroll-contain pr-2">
                 {generations.map((item) => (
                   <article key={item.id} className="rounded-2xl border border-gray-200 bg-white p-4 dark:border-white/[0.08] dark:bg-gray-900">
-                    <div className="flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2 py-1 font-medium ${item.action === 'edit' ? 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300' : 'bg-blue-50 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300'}`}>{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span className="rounded-full bg-violet-50 px-2 py-1 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className={`rounded-full px-2 py-1 ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10' : item.status === 'failed' ? 'bg-red-50 text-red-600 dark:bg-red-500/10' : 'bg-gray-100 text-gray-500 dark:bg-white/[0.06]'}`}>{item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '处理中'}</span><span className="font-mono text-gray-500">{item.ipAddress || '未知 IP'}</span><span className="text-gray-400">{localDate(item.createdAt)}</span></div>
-                    <div data-selectable-text className="mt-3 whitespace-pre-wrap break-words rounded-xl bg-gray-50 px-4 py-3 text-sm leading-6 text-gray-700 dark:bg-white/[0.04] dark:text-gray-200">{item.prompt || '未记录到提示词'}</div>
-                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-xs text-gray-500"><span>模型：{item.model || '—'}</span><span>尺寸：{item.size || '—'}（{item.resolutionTier === 'other' ? '其他' : item.resolutionTier}）</span><span>质量：{item.quality || '—'}</span><span>数量：{item.imageCount}</span><span>耗时：{formatDuration(item.durationMs)}</span><span className="font-mono">ID：{item.requestId}</span></div>
+                    <div className="flex flex-wrap items-center gap-2 text-xs"><span className={`rounded-full px-2 py-1 font-medium ${item.status === 'success' ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : item.status === 'failed' ? 'bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>{item.status === 'success' ? '成功' : item.status === 'failed' ? '失败' : '处理中'}</span><span className="font-medium text-gray-700 dark:text-gray-200">{item.action === 'edit' ? '编辑图片' : '生成图片'}</span><span className="text-gray-300 dark:text-gray-700">·</span><span>{item.module === 'sensenova-u1' ? 'U1 信息图' : 'GPT 生图'}</span><span className="rounded-full bg-gray-100 px-2 py-1 font-medium text-gray-700 dark:bg-white/[0.06] dark:text-gray-200">{formatRoutePath(item.routePath || item.upstreamChannel)}</span><span className="font-mono text-gray-500">{item.ipAddress || '未知 IP'}</span><span className="ml-auto text-gray-400">{localDate(item.createdAt)}</span></div>
+                    <div data-selectable-text className="mt-3 whitespace-pre-wrap break-words text-sm leading-6 text-gray-700 dark:text-gray-200">{item.prompt || '未记录到提示词'}</div>
+                    <div className="mt-4 grid gap-4 border-t border-gray-100 pt-4 text-xs dark:border-white/[0.06] sm:grid-cols-[minmax(0,1fr)_24px_minmax(0,1fr)_minmax(0,1fr)] sm:items-center">
+                      <div><div className="text-gray-400">输入尺寸</div><div className="mt-1 font-semibold text-gray-800 dark:text-gray-100">{item.size || '—'} <span className="font-normal text-gray-500">· {item.resolutionTier === 'other' ? '其他' : item.resolutionTier}</span></div></div>
+                      <div className="hidden text-center text-gray-300 sm:block">→</div>
+                      <div><div className="text-gray-400">实际输出</div><div className={`mt-1 font-semibold ${item.outputSize ? 'text-gray-800 dark:text-gray-100' : 'text-amber-600 dark:text-amber-300'}`}>{item.outputSize || (item.status === 'success' ? '等待浏览器回报' : '—')} {item.outputSize && <span className="font-normal text-gray-500">· {item.outputResolutionTier === 'other' ? '其他' : item.outputResolutionTier}</span>}</div></div>
+                      <div><div className="text-gray-400">耗时 / 模型</div><div className="mt-1 font-semibold text-gray-800 dark:text-gray-100">{formatDuration(item.durationMs)} <span className="font-normal text-gray-500">· {item.model || '—'}</span></div></div>
+                    </div>
+                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-gray-400"><span>质量：{item.quality || '—'}</span><span>数量：{item.imageCount}</span><span className="font-mono">ID：{item.requestId}</span></div>
+                    {item.status === 'failed' && item.errorSummary && <div className="mt-3 border-l-2 border-red-400 pl-3 text-xs leading-5 text-red-600 dark:text-red-300">{item.errorSummary}</div>}
                   </article>
                 ))}
                 {!generations.length && <div className="rounded-2xl border border-dashed border-gray-300 p-10 text-center text-sm text-gray-500">暂无生成记录；新请求会从本次更新后开始记录提示词。</div>}

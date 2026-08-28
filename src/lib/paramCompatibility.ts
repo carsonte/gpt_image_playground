@@ -1,7 +1,7 @@
 import { DEFAULT_PARAMS, type AppSettings, type TaskParams } from '../types'
 import { getActiveApiProfile, isOpenAICompatibleProvider } from './apiProfiles'
 import { isServerManagedApi } from './serverManagedApi'
-import { normalizeCodexCliImageSize, normalizeImageSize } from './size'
+import { normalizeCodexCliImageSize, normalizeImageSize, normalizeManagedGptSize } from './size'
 
 export const DEFAULT_FAL_IMAGE_SIZE = '1360x1024'
 export const MAX_FAL_OUTPUT_IMAGES = 4
@@ -40,6 +40,8 @@ export function normalizeParamsForSettings(
   if (nextParams.output_format === 'png') {
     nextParams.output_compression = DEFAULT_PARAMS.output_compression
   }
+
+  if (isServerManagedApi()) nextParams.size = normalizeManagedGptSize(nextParams.size)
 
   return nextParams
 }

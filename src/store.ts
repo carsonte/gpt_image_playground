@@ -67,8 +67,9 @@ import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraf
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
 import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
-import { stripInjectedCodexCliSizePrompt } from './lib/size'
+import { DEFAULT_MANAGED_GPT_SIZE, stripInjectedCodexCliSizePrompt } from './lib/size'
 import { getProfileImageModule, isSenseNovaU1Size } from './lib/imageModules'
+import { isServerManagedApi, reportManagedGenerationResult } from './lib/serverManagedApi'
 
 const FAL_RECOVERY_POLL_MS = 10_000
 const CUSTOM_RECOVERY_POLL_MS = 10_000
@@ -78,6 +79,9 @@ const customRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const openAIWatchdogTimers = new Map<string, ReturnType<typeof setTimeout>>()
 const agentRoundControllers = new Map<string, AbortController>()
 const agentRecoveryContinuations = new Set<string>()
+const DEFAULT_STORE_PARAMS = isServerManagedApi()
+  ? { ...DEFAULT_PARAMS, size: DEFAULT_MANAGED_GPT_SIZE, quality: 'high' as const }
+  : DEFAULT_PARAMS
 const deletedActiveAgentTasks = new Map<string, { task: TaskRecord; controller: AbortController }>()
 let agentConversationPersistenceReady = false
 let agentConversationMigrationPending = false
@@ -760,7 +764,7 @@ export const useStore = create<AppState>()(
       galleryInputDraft: null,
 
       // Params
-      params: { ...DEFAULT_PARAMS },
+      params: { ...DEFAULT_STORE_PARAMS },
       setParams: (p) => set((s) => ({ params: { ...s.params, ...p, output_format: 'png', output_compression: null } })),
       reusedTaskApiProfileId: null,
       reusedTaskApiProfileName: null,
@@ -1014,7 +1018,7 @@ export const useStore = create<AppState>()(
     }),
     {
       name: 'gpt-image-playground',
-      version: 2,
+      version: 3,
       migrate: migratePersistedState,
       partialize: getPersistedState,
       merge: mergePersistedState,
@@ -3617,6 +3621,7 @@ async function executeTask(taskId: string) {
       outputImageSizes,
     )
     const actualParams = deriveGalleryActualParams(taskProvider, isAsyncCustomTask, result.actualParams, actualParamsList, outputIds.length)
+    void reportManagedGenerationResult(result.requestId, actualParamsList[0]?.size)
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
     const revisedPrompts = activeProfile.codexCli && task.sourceMode !== 'agent'
@@ -4245,7 +4250,7 @@ export async function clearData(options: ClearOptions = { clearConfig: true, cle
     } else {
       setSettings({ ...DEFAULT_SETTINGS })
     }
-    setParams({ ...DEFAULT_PARAMS })
+    setParams({ ...DEFAULT_STORE_PARAMS })
   }
 
   showToast('所选数据已清空', 'success')

@@ -10,6 +10,8 @@ const MAX_1K_PIXELS = 1_572_864
 export type SizeTier = '1K' | '2K' | '4K'
 type PresetRatio = '1:1' | '3:2' | '2:3' | '16:9' | '9:16' | '4:3' | '3:4' | '21:9'
 
+export const DEFAULT_MANAGED_GPT_SIZE = '2048x2048'
+
 function roundToMultiple(value: number, multiple: number) {
   return Math.max(multiple, Math.round(value / multiple) * multiple)
 }
@@ -66,6 +68,24 @@ export function normalizeImageSize(size: string) {
 
   const { width, height } = normalizeDimensions(Number(match[1]), Number(match[2]))
   return `${width}x${height}`
+}
+
+export function getImageSizeTier(size: string): SizeTier | 'other' {
+  const match = normalizeImageSize(size).match(SIZE_PATTERN)
+  if (!match) return 'other'
+  const edge = Math.max(Number(match[1]), Number(match[2]))
+  if (edge <= 1536) return '1K'
+  if (edge <= 2560) return '2K'
+  if (edge <= 4096) return '4K'
+  return 'other'
+}
+
+export function normalizeManagedGptSize(size: string) {
+  const normalized = normalizeImageSize(size)
+  const match = normalized.match(SIZE_PATTERN)
+  if (!match) return DEFAULT_MANAGED_GPT_SIZE
+  if (getImageSizeTier(normalized) !== '1K') return normalized
+  return calculateImageSize('2K', `${match[1]}:${match[2]}`) ?? DEFAULT_MANAGED_GPT_SIZE
 }
 
 export function normalizeCodexCliImageSize(size: string) {

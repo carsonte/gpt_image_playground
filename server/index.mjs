@@ -127,6 +127,22 @@ function getResolutionTier(size) {
   return 'other'
 }
 
+function normalizeManagedGptSize(size) {
+  const value = String(size ?? '').trim().toLowerCase().replace('×', 'x')
+  if (getResolutionTier(value) !== '1K') return /^\d+x\d+$/.test(value) ? value : '2048x2048'
+  const presets = new Map([
+    ['1024x1024', '2048x2048'],
+    ['1536x1024', '2160x1440'],
+    ['1024x1536', '1440x2160'],
+    ['1280x720', '2560x1440'],
+    ['720x1280', '1440x2560'],
+    ['1024x768', '2048x1536'],
+    ['768x1024', '1536x2048'],
+    ['1280x544', '2560x1088'],
+  ])
+  return presets.get(value) ?? '2048x2048'
+}
+
 function getUpstreamModel(upstream, size) {
   if (upstream.channel === 'catapi' && getResolutionTier(size) === '2K') return config.catApi2kModel
   if (upstream.channel === 'catapi' && getResolutionTier(size) === '4K') return config.catApi4kModel
@@ -145,6 +161,31 @@ function replaceMultipartTextField(body, field, value) {
   const valueEnd = body.indexOf(Buffer.from('\r\n'), valueStart)
   if (valueEnd < 0) return body
   return Buffer.concat([body.subarray(0, valueStart), Buffer.from(value), body.subarray(valueEnd)])
+}
+
+function readMultipartTextField(body, field) {
+  const marker = Buffer.from(`name="${field}"`)
+  const markerIndex = body.indexOf(marker)
+  if (markerIndex < 0) return ''
+  const headerEnd = body.indexOf(Buffer.from('\r\n\r\n'), markerIndex + marker.length)
+  if (headerEnd < 0) return ''
+  const valueStart = headerEnd + 4
+  const valueEnd = body.indexOf(Buffer.from('\r\n'), valueStart)
+  if (valueEnd < 0) return ''
+  return body.subarray(valueStart, valueEnd).toString('utf8').trim()
+}
+
+function setMultipartTextField(body, contentType, field, value) {
+  const replaced = replaceMultipartTextField(body, field, value)
+  if (replaced !== body) return replaced
+  const match = String(contentType).match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  const boundary = match?.[1] ?? match?.[2]?.trim()
+  if (!boundary) return body
+  const closing = Buffer.from(`--${boundary}--`)
+  const closingIndex = body.lastIndexOf(closing)
+  if (closingIndex < 0) return body
+  const fieldBody = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${field}"\r\n\r\n${value}\r\n`)
+  return Buffer.concat([body.subarray(0, closingIndex), fieldBody, body.subarray(closingIndex)])
 }
 
 function runProxyQueue() {
@@ -492,6 +533,8 @@ app.post('/api-proxy/*path', async (req, res, next) => {
     res.status(response.status)
     res.setHeader('Content-Type', response.headers.get('content-type') || 'application/json')
     res.setHeader('X-Request-Id', requestId)
+    res.setHeader('X-Image-Upstream', 'sensenova')
+    res.setHeader('X-Image-Model', config.senseNovaModel)
     const delivered = finished(res)
     res.end(body)
     await delivered
@@ -499,7 +542,7 @@ app.post('/api-proxy/*path', async (req, res, next) => {
     const status = response.ok ? 'success' : 'failed'
     db.prepare(`
       UPDATE generation_events
-      SET status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
+      SET upstream_channel = 'sensenova', route_path = 'sensenova', status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
       WHERE request_id = ?
     `).run(status, response.status, durationMs, response.ok ? '' : sanitizeError(body.toString('utf8')), now(), requestId)
     addLog({
@@ -517,7 +560,7 @@ app.post('/api-proxy/*path', async (req, res, next) => {
     const message = sanitizeError(error.message)
     db.prepare(`
       UPDATE generation_events
-      SET status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
+      SET upstream_channel = 'sensenova', route_path = 'sensenova', status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
       WHERE request_id = ?
     `).run(durationMs, message, now(), requestId)
     addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, module: 'sensenova-u1', model: config.senseNovaModel, message } })
@@ -606,6 +649,11 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (endpoint.startsWith('/images/')) payload.n = 1
       } else {
         body = await readBody(req, 60 * 1024 * 1024)
+        size = readMultipartTextField(body, 'size') || size
+      }
+      if (endpoint.startsWith('/images/')) {
+        size = normalizeManagedGptSize(size)
+        if (payload) payload.size = size
       }
       const requestedRouteChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
       if (requestedRouteChannel !== routeChannel) {
@@ -620,17 +668,21 @@ app.post('/api-proxy/*path', async (req, res) => {
 
     db.prepare(`
       INSERT INTO generation_events (
-        request_id, ip_hash, ip_address, endpoint, module, action, model, prompt, size,
+        request_id, ip_hash, ip_address, endpoint, module, action, model, upstream_channel, route_path, prompt, size,
         resolution_tier, quality, image_count, status, created_at
-      ) VALUES (?, ?, ?, ?, 'gpt', ?, ?, ?, ?, ?, ?, ?, 'started', ?)
-    `).run(requestId, ipHash, ipAddress, endpoint, action, model, prompt, size, getResolutionTier(size), quality, imageCount, now())
+      ) VALUES (?, ?, ?, ?, 'gpt', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'started', ?)
+    `).run(requestId, ipHash, ipAddress, endpoint, action, model, gptUpstream.channel, gptUpstream.channel, prompt, size, getResolutionTier(size), quality, imageCount, now())
 
+    let routePath = gptUpstream.channel
     try {
       const sendUpstream = (upstream) => {
         const upstreamModel = getUpstreamModel(upstream, size)
         const upstreamBody = payload
           ? Buffer.from(JSON.stringify({ ...payload, model: upstreamModel }))
-          : replaceMultipartTextField(replaceMultipartTextField(body, 'output_format', 'png'), 'model', upstreamModel)
+          : [['output_format', 'png'], ['n', '1'], ['size', size], ['model', upstreamModel]].reduce(
+              (result, [field, value]) => setMultipartTextField(result, req.headers['content-type'], field, value),
+              body,
+            )
         const headers = {
           Authorization: `Bearer ${upstream.apiKey}`,
           Accept: req.headers.accept || 'application/json',
@@ -657,6 +709,7 @@ app.post('/api-proxy/*path', async (req, res) => {
           upstreamIndex += 1
           gptUpstream = nextUpstream
           model = getUpstreamModel(gptUpstream, size)
+          routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
           continue
         }
 
@@ -668,6 +721,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         upstreamIndex += 1
         gptUpstream = nextUpstream
         model = getUpstreamModel(gptUpstream, size)
+        routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
       }
       res.status(response.status)
       for (const name of ['content-type', 'cache-control']) {
@@ -688,9 +742,9 @@ app.post('/api-proxy/*path', async (req, res) => {
       const status = response.ok ? 'success' : 'failed'
       db.prepare(`
         UPDATE generation_events
-        SET model = ?, status = ?, upstream_status = ?, duration_ms = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, status = ?, upstream_status = ?, duration_ms = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(model, status, response.status, durationMs, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, status, response.status, durationMs, now(), requestId)
       addLog({
         requestId,
         level: response.ok ? 'info' : 'warn',
@@ -706,9 +760,9 @@ app.post('/api-proxy/*path', async (req, res) => {
       const message = sanitizeError(error.message)
       db.prepare(`
         UPDATE generation_events
-        SET status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(durationMs, message, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, durationMs, message, now(), requestId)
       addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, model, imageCount, channel: gptUpstream.channel, message } })
       if (!res.headersSent) res.status(502).json({ error: '上游图片服务请求失败', requestId })
       else if (!res.destroyed && !res.writableEnded) res.end()
@@ -719,6 +773,21 @@ app.post('/api-proxy/*path', async (req, res) => {
 })
 
 app.use(express.json({ limit: '1mb' }))
+
+app.post('/api/generation-result', (req, res) => {
+  const requestId = typeof req.body.requestId === 'string' ? req.body.requestId.trim() : ''
+  const outputSize = typeof req.body.outputSize === 'string' ? req.body.outputSize.trim().replace('×', 'x') : ''
+  if (!/^[0-9a-f-]{36}$/i.test(requestId) || !/^\d{2,5}x\d{2,5}$/i.test(outputSize)) {
+    return res.status(400).json({ error: '生成结果参数无效' })
+  }
+  const result = db.prepare(`
+    UPDATE generation_events
+    SET output_size = ?, output_resolution_tier = ?
+    WHERE request_id = ? AND ip_hash = ? AND status = 'success'
+  `).run(outputSize, getResolutionTier(outputSize), requestId, getIpHash(req))
+  if (!result.changes) return res.status(404).json({ error: '未找到对应的成功记录' })
+  res.json({ updated: true })
+})
 
 app.post('/api/prompt/optimize', async (req, res) => {
   const startedAt = Date.now()
@@ -1285,8 +1354,8 @@ app.get('/api/admin/generations', (req, res) => {
     params.push(normalizeIp(ipAddress))
   }
   if (query) {
-    conditions.push('(prompt LIKE ? OR ip_address LIKE ? OR model LIKE ? OR request_id LIKE ?)')
-    params.push(...Array(4).fill(`%${query}%`))
+    conditions.push('(prompt LIKE ? OR ip_address LIKE ? OR model LIKE ? OR request_id LIKE ? OR upstream_channel LIKE ? OR route_path LIKE ? OR output_size LIKE ?)')
+    params.push(...Array(7).fill(`%${query}%`))
   }
   if (dateFrom) {
     const date = new Date(dateFrom)
@@ -1311,14 +1380,19 @@ app.get('/api/admin/generations', (req, res) => {
       action: row.action,
       endpoint: row.endpoint,
       model: row.model,
+      upstreamChannel: row.upstream_channel,
+      routePath: row.route_path,
       prompt: row.prompt,
       size: row.size,
       resolutionTier: row.resolution_tier,
+      outputSize: row.output_size,
+      outputResolutionTier: row.output_resolution_tier,
       quality: row.quality,
       imageCount: row.image_count,
       status: row.status,
       upstreamStatus: row.upstream_status,
       durationMs: row.duration_ms,
+      errorSummary: row.error_summary,
       createdAt: row.created_at,
       completedAt: row.completed_at,
     })),

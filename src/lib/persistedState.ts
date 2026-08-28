@@ -4,6 +4,7 @@ import { normalizeAgentConversations } from './agentConversationState'
 import { ensureDefaultFavoriteCollection, normalizeFavoriteCollections, resolveDefaultFavoriteCollectionId } from './favoriteState'
 import { cleanStaleAgentInputDrafts, getPersistableAgentInputDrafts, isEmptyAgentInputDraft, normalizeAgentInputDraft, normalizeAgentInputDrafts, normalizeAgentInputDraftsByKey, saveGalleryInputDraft } from './inputDraftState'
 import { getPersistableAgentConversations, stripPersistedAgentConversations } from './agentResponseState'
+import { isServerManagedApi } from './serverManagedApi'
 
 export interface PersistedAppState {
   settings: AppSettings
@@ -121,10 +122,14 @@ export function createPersistedState(state: PersistedStateSource, includeLegacyA
   }
 }
 
-export function migratePersistedState(persistedState: unknown, _version?: number): unknown {
+export function migratePersistedState(persistedState: unknown, version?: number): unknown {
   if (!isRecord(persistedState)) return persistedState
+  const params = isRecord(persistedState.params) && isServerManagedApi() && (version ?? 0) < 3 && persistedState.params.quality === 'auto'
+    ? { ...persistedState.params, quality: 'high' }
+    : persistedState.params
   return {
     ...persistedState,
+    params,
     agentConversations: stripPersistedAgentConversations(persistedState.agentConversations),
   }
 }

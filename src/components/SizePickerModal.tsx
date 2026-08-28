@@ -3,7 +3,7 @@ import { calculateImageSize, normalizeCodexCliImageSize, normalizeImageSize, par
 import { usePreventBackgroundScroll } from '../hooks/usePreventBackgroundScroll'
 import ViewportTooltip from './ViewportTooltip'
 
-const TIERS: SizeTier[] = ['1K', '2K', '4K']
+const ALL_TIERS: SizeTier[] = ['1K', '2K', '4K']
 const SIZE_LIMIT_TEXT = '由于模型限制，不符合要求的分辨率会被自动规整：\n宽高均为 16 的倍数，最大边长 3840px，宽高比不超过 3:1，总像素限制为 655360-8294400。'
 const CODEX_CLI_SIZE_LIMIT_TEXT = '由于模型和 Codex CLI 限制，不符合要求的分辨率会被自动规整：\n宽高均为 16 的倍数，宽高比不超过 3:1，分辨率不超过 1K。'
 const CLAMPED_SIZE_TEXT = '由于模型限制，原始分辨率已被自动规整'
@@ -24,6 +24,8 @@ interface Props {
   onClose: () => void
   allowAuto?: boolean
   codexCli?: boolean
+  tiers?: SizeTier[]
+  ratioOnly?: boolean
 }
 
 type Mode = 'auto' | 'ratio' | 'resolution'
@@ -34,9 +36,9 @@ function parseSize(size: string) {
   return { width: match[1], height: match[2] }
 }
 
-function findPresetForSize(size: string) {
+function findPresetForSize(size: string, tiers: SizeTier[]) {
   const normalized = normalizeImageSize(size)
-  for (const tier of TIERS) {
+  for (const tier of tiers) {
     for (const ratio of RATIOS) {
       if (calculateImageSize(tier, ratio.value) === normalized) {
         return { tier, ratio: ratio.value }
@@ -46,7 +48,7 @@ function findPresetForSize(size: string) {
   return null
 }
 
-export default function SizePickerModal({ currentSize, onSelect, onClose, allowAuto = true, codexCli = false }: Props) {
+export default function SizePickerModal({ currentSize, onSelect, onClose, allowAuto = true, codexCli = false, tiers = ALL_TIERS, ratioOnly = false }: Props) {
   usePreventBackgroundScroll(true)
 
   const modalRef = useRef<HTMLDivElement>(null)
@@ -72,16 +74,17 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
     mouseDownTargetRef.current = null
   }
 
-  const currentPreset = findPresetForSize(currentSize)
+  const currentPreset = findPresetForSize(currentSize, tiers)
   const currentParsedSize = parseSize(currentSize)
   const [mode, setMode] = useState<Mode>(() => {
+    if (ratioOnly) return 'ratio'
     if (!currentSize || currentSize === 'auto') return allowAuto ? 'auto' : 'ratio'
     if (currentPreset) return 'ratio'
     return 'resolution'
   })
 
   // Ratio mode state
-  const [tier, setTier] = useState<SizeTier>(currentPreset?.tier ?? '1K')
+  const [tier, setTier] = useState<SizeTier>(currentPreset?.tier ?? tiers[0] ?? '1K')
   const [ratio, setRatio] = useState(currentPreset?.ratio ?? (allowAuto ? '1:1' : '4:3'))
   const [customRatio, setCustomRatio] = useState('16:9')
 
@@ -204,7 +207,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
         </div>
 
         <div className="space-y-6">
-          <div className="flex rounded-xl bg-gray-100/80 p-1 dark:bg-white/[0.04]">
+          {!ratioOnly && <div className="flex rounded-xl bg-gray-100/80 p-1 dark:bg-white/[0.04]">
             {allowAuto && (
               <button
                 onClick={() => setMode('auto')}
@@ -225,7 +228,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
             >
               自定义宽高
             </button>
-          </div>
+          </div>}
 
           <div className="h-[380px] max-h-[55vh] overflow-y-auto scrollbar-thin scrollbar-thumb-gray-200 dark:scrollbar-thumb-white/10 pr-1 -mr-1 pb-2">
             {mode === 'auto' && (
@@ -250,8 +253,8 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
               <div className="space-y-5 animate-fade-in">
                 <section>
                   <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">基准分辨率</div>
-                  <div className="grid grid-cols-3 gap-2">
-                    {TIERS.map((item) => {
+                  <div className={`grid gap-2 ${tiers.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
+                    {tiers.map((item) => {
                       const disabled = codexCli && item !== '1K'
                       return (
                         <div

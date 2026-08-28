@@ -73,7 +73,7 @@ export default function Header() {
     clearInputImages()
     setParams(module === 'sensenova-u1'
       ? { size: '2048x2048', quality: 'auto', output_format: 'png', moderation: 'auto', n: 1, transparent_output: false }
-      : { size: 'auto', quality: 'auto', output_format: 'png', moderation: 'auto', n: 1, transparent_output: false })
+      : { size: '2048x2048', quality: 'high', output_format: 'png', moderation: 'auto', n: 1, transparent_output: false })
   }
 
   useEffect(() => {

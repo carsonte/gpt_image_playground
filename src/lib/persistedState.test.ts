@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { AgentConversation, AppSettings, FavoriteCollection } from '../types'
 import { DEFAULT_PARAMS } from '../types'
 import { DEFAULT_SETTINGS } from './apiProfiles'
@@ -58,6 +58,8 @@ function fallback() {
 }
 
 describe('persisted state codec', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
   it('rejects non-record unknown data and falls back field-by-field for an invalid record', () => {
     class ExternalState {}
 
@@ -90,6 +92,13 @@ describe('persisted state codec', () => {
 
     expect(result.state.params.output_format).toBe('png')
     expect(result.state.params.output_compression).toBeNull()
+  })
+
+  it('migrates the hosted GPT default quality to high only once', () => {
+    vi.stubEnv('VITE_SERVER_MANAGED_API', 'true')
+
+    expect(migratePersistedState({ params: { ...DEFAULT_PARAMS, quality: 'auto' } }, 2)).toMatchObject({ params: { quality: 'high' } })
+    expect(migratePersistedState({ params: { ...DEFAULT_PARAMS, quality: 'auto' } }, 3)).toMatchObject({ params: { quality: 'auto' } })
   })
 
   it('migrates old Agent conversations without retaining generated image payloads', () => {

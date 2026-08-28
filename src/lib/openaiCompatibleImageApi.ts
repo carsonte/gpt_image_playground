@@ -536,9 +536,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       if (params.output_format !== 'png' && params.output_compression != null) {
         formData.append('output_compression', String(params.output_compression))
       }
-      if (params.n > 1) {
-        formData.append('n', String(params.n))
-      }
+      formData.append('n', String(params.n))
       if (profile.responseFormatB64Json) {
         formData.append('response_format', 'b64_json')
       }
@@ -633,11 +631,18 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
     }
 
-    if (profile.streamImages && isEventStreamResponse(response)) {
-      return parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
+    const result = profile.streamImages && isEventStreamResponse(response)
+      ? await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
+      : await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
+    const requestId = response.headers.get('x-request-id')?.trim()
+    const upstreamChannel = response.headers.get('x-image-upstream')?.trim()
+    const upstreamModel = response.headers.get('x-image-model')?.trim()
+    return {
+      ...result,
+      ...(requestId ? { requestId } : {}),
+      ...(upstreamChannel ? { upstreamChannel } : {}),
+      ...(upstreamModel ? { upstreamModel } : {}),
     }
-
-    return parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
   } finally {
     clearTimeout(timeoutId)
   }
@@ -989,6 +994,9 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
     ...(failedRequests.length ? { failedRequests } : {}),
+    ...(successfulResults[0].requestId ? { requestId: successfulResults[0].requestId } : {}),
+    ...(successfulResults[0].upstreamChannel ? { upstreamChannel: successfulResults[0].upstreamChannel } : {}),
+    ...(successfulResults[0].upstreamModel ? { upstreamModel: successfulResults[0].upstreamModel } : {}),
   }
 }
 

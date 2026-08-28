@@ -67,9 +67,13 @@ db.exec(`
     module TEXT NOT NULL DEFAULT 'gpt',
     action TEXT NOT NULL DEFAULT 'generate',
     model TEXT NOT NULL DEFAULT '',
+    upstream_channel TEXT NOT NULL DEFAULT '',
+    route_path TEXT NOT NULL DEFAULT '',
     prompt TEXT NOT NULL DEFAULT '',
     size TEXT NOT NULL DEFAULT '',
     resolution_tier TEXT NOT NULL DEFAULT 'other',
+    output_size TEXT NOT NULL DEFAULT '',
+    output_resolution_tier TEXT NOT NULL DEFAULT 'other',
     quality TEXT NOT NULL DEFAULT '',
     image_count INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed')),
@@ -121,7 +125,11 @@ ensureColumn('visit_sessions', 'ip_address', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'ip_address', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'module', "TEXT NOT NULL DEFAULT 'gpt'")
 ensureColumn('generation_events', 'action', "TEXT NOT NULL DEFAULT 'generate'")
+ensureColumn('generation_events', 'upstream_channel', "TEXT NOT NULL DEFAULT ''")
+ensureColumn('generation_events', 'route_path', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'prompt', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'size', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'resolution_tier', "TEXT NOT NULL DEFAULT 'other'")
+ensureColumn('generation_events', 'output_size', "TEXT NOT NULL DEFAULT ''")
+ensureColumn('generation_events', 'output_resolution_tier', "TEXT NOT NULL DEFAULT 'other'")
 ensureColumn('generation_events', 'quality', "TEXT NOT NULL DEFAULT ''")

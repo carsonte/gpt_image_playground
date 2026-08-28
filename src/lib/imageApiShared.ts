@@ -38,6 +38,12 @@ export interface CallApiResult {
   rawImageUrls?: string[]
   /** 并发多图请求中失败的单张请求 */
   failedRequests?: Array<{ requestIndex: number; error: string }>
+  /** 托管服务器生成记录 ID */
+  requestId?: string
+  /** 实际完成请求的上游线路 */
+  upstreamChannel?: string
+  /** 实际完成请求的上游模型 */
+  upstreamModel?: string
 }
 
 export function isHttpUrl(value: unknown): value is string {

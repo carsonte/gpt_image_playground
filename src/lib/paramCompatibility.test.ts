@@ -1,9 +1,11 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { createDefaultFalProfile, createDefaultOpenAIProfile, DEFAULT_SETTINGS, normalizeSettings } from './apiProfiles'
 import { getOutputImageLimitForSettings, normalizeParamsForSettings } from './paramCompatibility'
 
 describe('parameter compatibility', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
   it('limits OpenAI output count to 10', () => {
     const openAIProfile = createDefaultOpenAIProfile({ apiKey: 'test-key', streamImages: false })
     const settings = normalizeSettings({
@@ -94,5 +96,15 @@ describe('parameter compatibility', () => {
     })
 
     expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2048x2048' }, settings).size).toBe('2048x2048')
+  })
+
+  it('forces hosted GPT requests to use at least 2K', () => {
+    vi.stubEnv('VITE_SERVER_MANAGED_API', 'true')
+    const profile = createDefaultOpenAIProfile({ apiKey: 'test-key' })
+    const settings = normalizeSettings({ ...DEFAULT_SETTINGS, profiles: [profile], activeProfileId: profile.id })
+
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: 'auto' }, settings).size).toBe('2048x2048')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '1024x1536' }, settings).size).toBe('1440x2160')
+    expect(normalizeParamsForSettings({ ...DEFAULT_PARAMS, size: '2880x2880' }, settings).size).toBe('2880x2880')
   })
 })
