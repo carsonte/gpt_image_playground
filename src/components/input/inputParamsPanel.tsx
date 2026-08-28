@@ -149,23 +149,9 @@ export default function InputParamsPanel({
       </label>
       <label className="flex flex-col gap-0.5">
         <span className="text-gray-400 dark:text-gray-500 ml-1">格式</span>
-        <Select
-          value={params.output_format}
-          onChange={(val) => {
-            setParams({
-              output_format: val as TaskParams['output_format'],
-              ...(val === 'png' ? { output_compression: null } : {}),
-              ...(val === 'jpeg' ? { transparent_output: false } : {}),
-            })
-          }}
-          options={[
-            { label: 'PNG', value: 'png' },
-            { label: 'JPEG', value: 'jpeg' },
-            { label: 'WebP', value: 'webp' },
-          ]}
-          showValueTooltips={false}
-          className={selectClass}
-        />
+        <div className={`${selectClass} flex items-center opacity-60 cursor-not-allowed`}>
+          PNG
+        </div>
       </label>
       {showTransparentOutputControl && (
         <label

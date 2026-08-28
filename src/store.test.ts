@@ -483,12 +483,12 @@ describe('mask draft lifecycle in store actions', () => {
     await clearImages()
   })
 
-  it('stores locally post-processed transparent output as WebP', async () => {
+  it('normalizes legacy WebP transparent output requests to PNG', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockResolvedValueOnce({
-      images: ['data:image/webp;base64,generated'],
-      actualParams: { output_format: 'webp' },
-      actualParamsList: [{ output_format: 'webp' }],
+      images: ['data:image/png;base64,generated'],
+      actualParams: { output_format: 'png' },
+      actualParamsList: [{ output_format: 'png' }],
       revisedPrompts: [],
     })
     useStore.setState({
@@ -506,17 +506,12 @@ describe('mask draft lifecycle in store actions', () => {
 
     expect(callImageApi).toHaveBeenCalledWith(expect.objectContaining({
       params: expect.objectContaining({
-        output_format: 'webp',
-        output_compression: 25,
+        output_format: 'png',
+        output_compression: null,
         transparent_output: true,
       }),
     }))
-    expect(removeKeyedBackgroundFromDataUrl).toHaveBeenCalledWith(
-      'data:image/webp;base64,generated',
-      undefined,
-      'webp',
-      25,
-    )
+    expect(removeKeyedBackgroundFromDataUrl).toHaveBeenCalledWith('data:image/png;base64,generated')
     await clearTasks()
     await clearImages()
   })

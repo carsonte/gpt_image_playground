@@ -761,7 +761,7 @@ export const useStore = create<AppState>()(
 
       // Params
       params: { ...DEFAULT_PARAMS },
-      setParams: (p) => set((s) => ({ params: { ...s.params, ...p } })),
+      setParams: (p) => set((s) => ({ params: { ...s.params, ...p, output_format: 'png', output_compression: null } })),
       reusedTaskApiProfileId: null,
       reusedTaskApiProfileName: null,
       reusedTaskApiProfileMissing: false,
@@ -1721,6 +1721,8 @@ export async function submitTask(options: { allowFullMask?: boolean; useCurrentA
   }
 
   const normalizedParams = normalizeParamsForSettings(params, requestSettings, { hasInputImages: orderedInputImages.length > 0 })
+  normalizedParams.output_format = 'png'
+  normalizedParams.output_compression = null
   if (senseNovaU1) {
     normalizedParams.size = isSenseNovaU1Size(params.size) ? params.size : '2048x2048'
     normalizedParams.n = 1
@@ -3834,6 +3836,8 @@ export async function retryTask(task: TaskRecord) {
   const { settings } = useStore.getState()
   const activeProfile = getActiveApiProfile(settings)
   const normalizedParams = normalizeParamsForSettings(task.params, settings, { hasInputImages: task.inputImageIds.length > 0 })
+  normalizedParams.output_format = 'png'
+  normalizedParams.output_compression = null
   const shouldUseTransparentOutput = (normalizedParams.output_format === 'png' || normalizedParams.output_format === 'webp') && normalizedParams.transparent_output
   const taskParams = shouldUseTransparentOutput
     ? getTransparentRequestParams(normalizedParams)

@@ -189,19 +189,21 @@ function QueueLimitField({ label, hint, value, min, max, onChange }: QueueLimitF
 type GptRouteOptionProps = {
   channel: QueueSettings['gptChannel']
   name: string
+  route: string
   description: string
   selected: boolean
   configured: boolean
   onChange: (channel: QueueSettings['gptChannel']) => void
 }
 
-function GptRouteOption({ channel, name, description, selected, configured, onChange }: GptRouteOptionProps) {
+function GptRouteOption({ channel, name, route, description, selected, configured, onChange }: GptRouteOptionProps) {
   return (
     <label className={`flex min-h-28 cursor-pointer flex-col justify-between rounded-2xl border p-4 transition ${selected ? 'border-blue-500 bg-blue-50/70 ring-2 ring-blue-500/10 dark:bg-blue-500/[0.08]' : 'border-gray-200 bg-gray-50/70 hover:border-gray-300 dark:border-white/[0.08] dark:bg-white/[0.025] dark:hover:border-white/[0.16]'} ${configured ? '' : 'cursor-not-allowed opacity-50'}`}>
       <span className="flex items-start justify-between gap-3">
         <span>
-          <span className="flex items-center gap-2 text-sm font-semibold"><span>{name}</span><span className="text-gray-300 dark:text-gray-600">→</span><span>BlackEngine</span></span>
-          <span className="mt-1.5 block text-xs leading-5 text-gray-500">{description}</span>
+          <span className="block text-sm font-semibold">{name}</span>
+          <span className={`mt-1 block text-xs font-medium ${selected ? 'text-blue-900 dark:text-blue-100' : 'text-gray-700 dark:text-gray-200'}`}>{route}</span>
+          <span className={`mt-1.5 block text-xs leading-5 ${selected ? 'text-blue-700 dark:text-blue-200' : 'text-gray-500'}`}>{description}</span>
         </span>
         <input type="radio" name="gpt-channel" value={channel} checked={selected} disabled={!configured} onChange={() => onChange(channel)} className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600" />
       </span>
@@ -596,14 +598,34 @@ export default function AdminApp() {
                 <div className="p-5">
                   {queueSettings && <fieldset>
                     <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div><legend className="font-semibold">GPT 生图线路</legend><p className="mt-1 text-xs leading-5 text-gray-500">选择一条主线路；发生网络、鉴权、限流或服务端错误时自动回退到 BlackEngine。</p></div>
+                      <div><legend className="font-semibold">GPT 生图路由</legend><p className="mt-1 text-xs leading-5 text-gray-500">系统按请求分辨率自动选模和选择线路，所有新任务固定输出 PNG。</p></div>
                       <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${queueSettings.primaryConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>BlackEngine {queueSettings.primaryConfigured ? '备用可用' : '尚未配置'}</span>
                     </div>
-                    <div className="mt-4 grid gap-3 md:grid-cols-2">
-                      <GptRouteOption channel="sixoner" name="Sixoner" description="当前默认线路，异常时转入 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
-                      <GptRouteOption channel="catapi" name="CatAPI" description="可选主线路，依次回退 Sixoner、BlackEngine。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                    <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/[0.08]">
+                      {[
+                        { tier: '1K', model: 'gpt-image-2', route: queueSettings.gptChannel === 'catapi' ? 'CatAPI → Sixoner → BlackEngine' : 'Sixoner → BlackEngine', fixed: false },
+                        { tier: '2K', model: 'gpt-image-2-2k', route: queueSettings.catApiConfigured ? 'CatAPI → Sixoner → BlackEngine' : 'CatAPI 未配置，暂时沿用可用线路', fixed: queueSettings.catApiConfigured },
+                        { tier: '4K', model: 'gpt-image-2-4k', route: queueSettings.gptChannel === 'catapi' ? 'CatAPI → Sixoner → BlackEngine' : 'Sixoner → BlackEngine', fixed: false },
+                      ].map((item, idx) => (
+                        <div key={item.tier} className={`grid gap-2 px-4 py-3 sm:grid-cols-[48px_150px_minmax(0,1fr)_72px] sm:items-center ${idx ? 'border-t border-gray-100 dark:border-white/[0.06]' : ''}`}>
+                          <span className="text-sm font-bold text-gray-900 dark:text-white">{item.tier}</span>
+                          <code className="text-xs text-gray-500 dark:text-gray-400">{item.model}</code>
+                          <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{item.route}</span>
+                          {item.fixed
+                            ? <span className="w-fit rounded-full bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">固定优先</span>
+                            : <span className="w-fit rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500 dark:bg-white/[0.06] dark:text-gray-300">{item.tier === '2K' ? '待配置' : '跟随设置'}</span>}
+                        </div>
+                      ))}
                     </div>
-                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">切换规则：</span>保存后，新提交任务立即使用新线路；正在生成和已经排队的任务继续使用进入队列时的线路，不会中途切换。</div>
+                    <div className="mt-6">
+                      <h3 className="text-sm font-semibold">1K / 4K 主线路</h3>
+                      <p className="mt-1 text-xs leading-5 text-gray-500">这里只影响 1K 和 4K；2K 始终优先 CatAPI，不受此选项影响。</p>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <GptRouteOption channel="sixoner" name="Sixoner 主线路" route="Sixoner → BlackEngine" description="适用于 1K/4K；Sixoner 异常时回退 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                      <GptRouteOption channel="catapi" name="CatAPI 主线路" route="CatAPI → Sixoner → BlackEngine" description="适用于 1K/4K；按顺序自动回退两条备用线路。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
+                    </div>
+                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">生效时间：</span>保存后只影响新提交的 1K/4K 任务；正在生成和已经排队的任务不会中途换线。</div>
                   </fieldset>}
 
                   <div className="mt-7 border-t border-gray-100 pt-6 dark:border-white/[0.06]">

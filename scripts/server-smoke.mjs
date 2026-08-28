@@ -263,13 +263,32 @@ try {
   const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')
 
+  await request('/api/admin/settings/queue', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2, gptChannel: 'sixoner' }),
+  })
+  const forcedCatApi2kResult = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: 'Sixoner 模式 2K 强制 CatAPI 测试', size: '2048x2048', n: 1 }),
+  })
+  const forcedCatApi2kPayload = upstreamPayloads.find((item) => item.prompt === 'Sixoner 模式 2K 强制 CatAPI 测试')
+  if (forcedCatApi2kPayload?.model !== 'gpt-image-2-2k' || forcedCatApi2kResult.response.headers.get('x-image-upstream') !== 'catapi') throw new Error('Sixoner 模式下 2K 请求未优先使用 CatAPI')
+  await request('/api/admin/settings/queue', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json', Cookie: cookie, Origin: origin },
+    body: JSON.stringify({ concurrency: 1, perIpConcurrency: 1, perIpQueueLimit: 3, senseNovaConcurrency: 2, senseNovaPerIpConcurrency: 1, senseNovaPerIpQueueLimit: 2, gptChannel: 'catapi' }),
+  })
+
   const catApi4kResult = await request('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ model: 'wrong-model', prompt: 'CatAPI 4K 模型路由测试', size: '2880x2880', n: 1 }),
+    body: JSON.stringify({ model: 'wrong-model', prompt: 'CatAPI 4K 模型路由测试', size: '2880x2880', output_format: 'webp', output_compression: 80, n: 1 }),
   })
   const catApi4kPayload = upstreamPayloads.find((item) => item.prompt === 'CatAPI 4K 模型路由测试')
   if (catApi4kPayload?.model !== 'gpt-image-2-4k' || catApi4kResult.response.headers.get('x-image-model') !== 'gpt-image-2-4k') throw new Error('CatAPI 4K 请求未使用专用模型')
+  if (catApi4kPayload?.output_format !== 'png' || 'output_compression' in catApi4kPayload) throw new Error('GPT 生图请求未强制使用 PNG')
 
   const sixonerFallbackResult = await request('/api-proxy/images/generations', {
     method: 'POST',

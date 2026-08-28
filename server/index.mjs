@@ -551,13 +551,6 @@ app.post('/api-proxy/*path', async (req, res) => {
   const primaryUpstream = { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel }
   const sixonerUpstream = { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
   const catApiUpstream = { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel }
-  const upstreamChain = (gptChannel === 'catapi'
-    ? [catApiUpstream, sixonerUpstream, primaryUpstream]
-    : [sixonerUpstream, primaryUpstream]
-  ).filter((upstream, idx) => idx === 0 || upstream.apiKey)
-  let gptUpstream = upstreamChain[0]
-  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置 ${gptUpstream.channel === 'catapi' ? 'CatAPI' : 'Sixoner'} API Key`, requestId })
-
   const auditParams = readParamsAudit(req)
   const auditedImageCount = Math.max(1, Number.parseInt(auditParams.n ?? 1, 10) || 1)
   if (auditedImageCount > 1) {
@@ -567,6 +560,15 @@ app.post('/api-proxy/*path', async (req, res) => {
   let prompt = readPromptAudit(req)
   let size = typeof auditParams.size === 'string' ? auditParams.size.slice(0, 40) : ''
   let quality = typeof auditParams.quality === 'string' ? auditParams.quality.slice(0, 40) : ''
+  const defaultRouteChannel = gptChannel === 'catapi' && !config.catApiKey ? 'sixoner' : gptChannel
+  const getGptUpstreamChain = (channel) => (channel === 'catapi'
+    ? [catApiUpstream, sixonerUpstream, primaryUpstream]
+    : [sixonerUpstream, primaryUpstream]
+  ).filter((upstream, idx) => idx === 0 || upstream.apiKey)
+  let routeChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
+  let upstreamChain = getGptUpstreamChain(routeChannel)
+  let gptUpstream = upstreamChain[0]
+  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置 ${gptUpstream.channel === 'catapi' ? 'CatAPI' : 'Sixoner'} API Key`, requestId })
   const requestedAction = String(req.headers['x-image-action'] ?? '')
   const action = ['generate', 'edit'].includes(requestedAction) ? requestedAction : endpoint === '/images/edits' ? 'edit' : 'generate'
   const activeForIp = [...activeProxyItems.values()].filter((item) => item.ipAddress === ipAddress).length
@@ -592,6 +594,10 @@ app.post('/api-proxy/*path', async (req, res) => {
         body = await readBody(req)
         payload = JSON.parse(body.toString('utf8'))
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求内容必须是 JSON 对象')
+        if (endpoint === '/images/generations') {
+          payload.output_format = 'png'
+          delete payload.output_compression
+        }
         if (!prompt && typeof payload.prompt === 'string') prompt = payload.prompt.trim().slice(0, 5000)
         if (typeof payload.size === 'string') size = payload.size.slice(0, 40)
         if (typeof payload.quality === 'string') quality = payload.quality.slice(0, 40)
@@ -600,6 +606,12 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (endpoint.startsWith('/images/')) payload.n = 1
       } else {
         body = await readBody(req, 60 * 1024 * 1024)
+      }
+      const requestedRouteChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
+      if (requestedRouteChannel !== routeChannel) {
+        routeChannel = requestedRouteChannel
+        upstreamChain = getGptUpstreamChain(routeChannel)
+        gptUpstream = upstreamChain[0]
       }
       model = getUpstreamModel(gptUpstream, size)
     } catch (error) {
@@ -618,7 +630,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         const upstreamModel = getUpstreamModel(upstream, size)
         const upstreamBody = payload
           ? Buffer.from(JSON.stringify({ ...payload, model: upstreamModel }))
-          : replaceMultipartTextField(body, 'model', upstreamModel)
+          : replaceMultipartTextField(replaceMultipartTextField(body, 'output_format', 'png'), 'model', upstreamModel)
         const headers = {
           Authorization: `Bearer ${upstream.apiKey}`,
           Accept: req.headers.accept || 'application/json',

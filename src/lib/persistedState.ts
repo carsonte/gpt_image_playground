@@ -77,10 +77,8 @@ function normalizeParams(value: unknown, fallback: TaskParams): TaskParams {
   return {
     size: typeof value.size === 'string' ? value.size : fallback.size,
     quality: value.quality === 'auto' || value.quality === 'low' || value.quality === 'medium' || value.quality === 'high' ? value.quality : fallback.quality,
-    output_format: value.output_format === 'png' || value.output_format === 'jpeg' || value.output_format === 'webp' ? value.output_format : fallback.output_format,
-    output_compression: value.output_compression === null || (typeof value.output_compression === 'number' && Number.isFinite(value.output_compression))
-      ? value.output_compression
-      : fallback.output_compression,
+    output_format: 'png',
+    output_compression: null,
     moderation: value.moderation === 'auto' || value.moderation === 'low' ? value.moderation : fallback.moderation,
     n: typeof value.n === 'number' && Number.isFinite(value.n) ? value.n : fallback.n,
     transparent_output: typeof value.transparent_output === 'boolean' ? value.transparent_output : fallback.transparent_output,
@@ -95,7 +93,7 @@ export function createPersistedState(state: PersistedStateSource, includeLegacyA
     previousPresetConfig: state.previousPresetConfig ?? null,
     dismissedPresetProfileIds: state.dismissedPresetProfileIds ?? [],
     dismissedPresetProviderIds: state.dismissedPresetProviderIds ?? [],
-    params: state.params,
+    params: { ...state.params, output_format: 'png', output_compression: null },
     ...(settings.persistInputOnRestart && (state.appMode === 'gallery' || galleryInputDraft)
       ? {
           prompt: galleryInputDraft?.prompt ?? '',

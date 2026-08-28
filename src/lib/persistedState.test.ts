@@ -83,6 +83,15 @@ describe('persisted state codec', () => {
     expect(result.state).not.toHaveProperty('setPrompt')
   })
 
+  it('normalizes legacy output formats to PNG', () => {
+    const result = normalizePersistedState({
+      params: { ...DEFAULT_PARAMS, output_format: 'webp', output_compression: 80 },
+    }, fallback(), 100)!
+
+    expect(result.state.params.output_format).toBe('png')
+    expect(result.state.params.output_compression).toBeNull()
+  })
+
   it('migrates old Agent conversations without retaining generated image payloads', () => {
     const legacy = conversation({
       activeRoundId: 'round-a',
