@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { DEFAULT_SETTINGS } from './apiProfiles'
 import { callImageApi } from './api'
-import { maybeAppendStreamingHint } from './imageApiShared'
+import { getApiErrorMessage, maybeAppendStreamingHint } from './imageApiShared'
 
 describe('API error hints', () => {
   it.each([false, true])('uses the transparent background hint when streaming is %s', (streamImages) => {
@@ -11,6 +11,23 @@ describe('API error hints', () => {
     expect(maybeAppendStreamingHint(message, 400, streamImages)).toBe(
       `${message}\n提示：当前使用的 API 不支持为该模型使用原生透明背景，请将「透明背景实现方式」切换为「本地后处理」。`,
     )
+  })
+
+  it('includes the managed proxy request ID in an API error message', async () => {
+    const requestId = '7d2f1b53-7ca0-4a2b-8aa6-3f6d80c2c5d1'
+    const response = new Response(JSON.stringify({ error: { message: '上游服务失败' } }), {
+      status: 502,
+      headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId },
+    })
+
+    await expect(getApiErrorMessage(response)).resolves.toBe(`上游服务失败\n请求 ID：${requestId}`)
+  })
+
+  it('falls back to the request ID in a proxy error body when the header is absent', async () => {
+    const requestId = '9b7ecf59-7305-4a5e-9ef3-2468a9bb7a20'
+    const response = new Response(JSON.stringify({ error: '读取上游响应体失败', requestId }), { status: 502 })
+
+    await expect(getApiErrorMessage(response)).resolves.toBe(`读取上游响应体失败\n请求 ID：${requestId}`)
   })
 })
 

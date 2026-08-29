@@ -35,14 +35,16 @@ export function createSessionToken() {
 export function sanitizeError(value) {
   return String(value ?? '')
     .replace(/Bearer\s+[^\s"']+/gi, 'Bearer [REDACTED]')
+    .replace(/((?:Authorization|Proxy-Authorization)\s*:\s*)(?:[A-Za-z]+\s+)?[^\s"']+/gi, '$1[REDACTED]')
     .replace(/sk-[A-Za-z0-9_-]{8,}/g, 'sk-[REDACTED]')
     .replace(/([?&](?:api_?key|key|token)=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(/data:image\/[a-z0-9.+-]+(?:;[^,\s"']*)?,[^\s"'}]+/gi, 'data:image/[REDACTED]')
     .slice(0, 500)
 }
 
 export function safeDetails(value) {
   const allowed = {}
-  for (const key of ['announcementId', 'blockId', 'version', 'deletedCount', 'endpoint', 'model', 'module', 'imageCount', 'inputLength', 'outputLength', 'upstreamStatus', 'fallbackStatus', 'channel', 'from', 'to', 'queueWaitMs', 'message', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position']) {
+  for (const key of ['announcementId', 'blockId', 'version', 'deletedCount', 'endpoint', 'model', 'module', 'imageCount', 'inputLength', 'outputLength', 'requestBytes', 'inputImageCount', 'inputImageBytes', 'hasMask', 'responseBytes', 'phase', 'headersMs', 'bodyMs', 'deliveryMs', 'attempt', 'routeAttempts', 'upstreamStatus', 'fallbackStatus', 'channel', 'from', 'to', 'queueWaitMs', 'message', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position']) {
     if (value[key] !== undefined) allowed[key] = key === 'message' ? sanitizeError(value[key]) : value[key]
   }
   return JSON.stringify(allowed)

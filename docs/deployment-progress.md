@@ -1,6 +1,6 @@
 # GPT Image Playground 项目进度
 
-最后更新：2026-08-28
+最后更新：2026-08-29
 
 ## 当前版本
 
@@ -18,8 +18,8 @@
 - 托管版 GPT 默认尺寸改为 2K，只保留 2K/4K；旧客户端继续发送 1K 或 `auto` 时，前端和服务器都会提升为 2K。
 - 托管版 GPT 默认质量改为 `high`；已有浏览器中的旧 `auto` 默认值会在本次版本升级时迁移一次，之后仍允许用户手动选择其他质量。
 - 生成记录新增实际上游线路与完整回退链、输入尺寸/档位、浏览器解码后的真实输出尺寸/档位、耗时、状态和错误摘要，能够识别“请求 4K、实际输出 1K”的降级。
-- 自动测试覆盖输入图片上传、编辑动作识别、PNG 强制输出、单张输出、1K 升级、线路回退、真实输出回报和默认质量迁移；519 项测试、服务器冒烟测试与生产构建均通过。
-- 本节修复尚未提交 Git 或部署服务器。
+- 自动测试覆盖输入图片上传、编辑动作识别、PNG 强制输出、单张输出、1K 升级、线路回退、真实输出回报和默认质量迁移；本次发布验证为 527 项测试、服务器冒烟测试与生产构建均通过。
+- 本节修复已完成本地浏览器验收，待提交 Git 并部署服务器。
 
 ## 2026-08-28 更新
 
@@ -129,17 +129,19 @@
 
 ## 验证记录
 
+- 2026-08-28 已将 `31085db`（独立报错记录）推送到 `origin/main` 并部署到生产服务器，SQLite 在线备份、Docker 构建和健康检查均通过。
 - `npm run build`：通过。
-- `npm test`：34 个测试文件、515 个测试全部通过。
+- `npm test`：35 个测试文件、527 个测试全部通过。
 - `npm run test:server`：通过。
 - `npm run verify:release`：通过。
+- Chrome 浏览器级验收：通过，步骤和结果见 [`docs/browser-acceptance.md`](browser-acceptance.md)。
 - Docker 生产构建：通过。
 - 容器健康检查：通过。
 - HTTP 反向代理：通过。
 - HTTPS 证书与跳转：通过。
 - 正式首页加载：通过。
 - 生产接口 `/api/health` 返回 `ok: true`、`upstreamConfigured: true`。
-- 生产队列接口 `/api/queue/status` 返回并发上限 `4`。
+- 生产队列接口 `/api/queue/status` 返回并发上限 `8`。
 - 生产容器状态为 `healthy`。
 
 ## 敏感信息规则
@@ -155,6 +157,7 @@
 2. 较大版本更新可先创建临时集成分支，确认兼容后合入 `main`。
 3. 继续观察正式环境的生图成功率、平均耗时、并发队列和异常日志。
 4. 定期检查 `deploy/data/backups/`，确认 SQLite 备份可以正常恢复。
+5. 观察 4K 图片编辑的 524 与响应中断日志，证据、诊断字段和后续评估见 `docs/image-edit-timeout-follow-up.md`。
 
 ## SenseNova U1 信息图
 
@@ -183,6 +186,7 @@
 继续工作前先阅读：
 
 - `docs/deployment-progress.md`
+- `docs/image-edit-timeout-follow-up.md`
 - `docs/baota-admin-announcement-plan.md`
 - `docs/update-workflow.md`
 - `deploy/UPDATE.md`

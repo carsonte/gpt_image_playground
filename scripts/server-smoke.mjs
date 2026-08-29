@@ -41,6 +41,15 @@ const upstream = createServer(async (req, res) => {
     upstreamActive -= 1
     return
   }
+  if (req.url === '/catapi/v1/images/generations' && payload?.prompt === '响应体中途断开测试') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.write('{"data":[{"b64_json":"truncated')
+    setTimeout(() => {
+      res.destroy()
+      upstreamActive -= 1
+    }, 50)
+    return
+  }
   await new Promise((resolve) => setTimeout(resolve, 120))
   const shouldFailCatApi = req.url === '/catapi/v1/images/generations' && ['一只戴墨镜的橘猫', 'CatAPI 转 Sixoner 测试'].includes(payload?.prompt)
   const shouldFailSixoner = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫'
@@ -295,6 +304,19 @@ try {
   await deliveryResponse.json()
   const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')
+
+  const truncatedResponse = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '响应体中途断开测试', size: '2048x2048', n: 1 }),
+  })
+  if (truncatedResponse.response.headers.get('x-image-upstream') !== 'sixoner') throw new Error('上游响应体中途断开后未切换备用线路')
+  const truncatedFallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
+  const truncatedFallback = truncatedFallbackLogs.payload.logs.find((item) => item.requestId === truncatedResponse.response.headers.get('x-request-id'))
+  if (truncatedFallback?.details?.phase !== 'response_body' || !Number.isFinite(truncatedFallback?.details?.bodyMs)) throw new Error('响应体中途断开未记录响应体阶段诊断信息')
+  const truncatedProxyLogs = await request('/api/admin/logs?eventPrefix=image.proxy', { headers: { Cookie: cookie } })
+  const truncatedProxy = truncatedProxyLogs.payload.logs.find((item) => item.requestId === truncatedResponse.response.headers.get('x-request-id'))
+  if (!Number.isFinite(truncatedProxy?.details?.requestBytes) || truncatedProxy?.details?.routeAttempts !== 2) throw new Error('代理成功记录缺少请求体大小或线路尝试次数')
 
   await request('/api/admin/settings/queue', {
     method: 'PUT',

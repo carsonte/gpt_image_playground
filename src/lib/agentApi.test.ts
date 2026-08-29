@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DEFAULT_PARAMS } from '../types'
 import { createDefaultOpenAIProfile, DEFAULT_SETTINGS } from './apiProfiles'
-import { callAgentConversationTitleApi, callAgentResponsesApi, parseBatchImageCallArguments } from './agentApi'
+import { callAgentConversationTitleApi, callAgentResponsesApi, callBatchImageSingle, parseBatchImageCallArguments } from './agentApi'
 
 describe('parseBatchImageCallArguments', () => {
   it('trims ids and prompts, fills missing ids, and skips empty prompts', () => {
@@ -179,7 +179,60 @@ describe('callAgentResponsesApi', () => {
     const [, init] = fetchMock.mock.calls[0]
     const body = JSON.parse(String((init as RequestInit).body))
     expect(body.tools[0].size).toBeUndefined()
+    expect(body.tools[0].quality).toBeUndefined()
     expect(body.instructions).toContain('Start every image prompt with exactly "Generate at 1024x1024 resolution." followed by a space.')
+  })
+
+  it('keeps the configured quality parameter for non-Codex Agent profiles', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: 'message', content: [{ type: 'output_text', text: 'OK' }] }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const profile = createDefaultOpenAIProfile({
+      apiKey: 'test-key',
+      apiMode: 'responses',
+      codexCli: false,
+    })
+
+    await callAgentResponsesApi({
+      settings: DEFAULT_SETTINGS,
+      profile,
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      input: 'prompt',
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.tools[0].quality).toBe('high')
+  })
+
+  it('omits size and quality from Codex CLI batch image requests', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      output: [{ type: 'image_generation_call', result: 'ZmluYWw=' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    const profile = createDefaultOpenAIProfile({
+      apiKey: 'test-key',
+      apiMode: 'responses',
+      codexCli: true,
+    })
+
+    await callBatchImageSingle({
+      profile,
+      params: { ...DEFAULT_PARAMS, size: '1024x1024', quality: 'high' },
+      batchItemId: 'item-1',
+      prompt: 'prompt',
+      referenceImageDataUrls: [],
+    })
+
+    const [, init] = fetchMock.mock.calls[0]
+    const body = JSON.parse(String((init as RequestInit).body))
+    expect(body.tools[0].size).toBeUndefined()
+    expect(body.tools[0].quality).toBeUndefined()
   })
 
   it('extracts image_generation results from base64 object fields', async () => {

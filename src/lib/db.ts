@@ -43,11 +43,66 @@ function dbTransaction<T>(
   return openDB().then(
     (db) =>
       new Promise((resolve, reject) => {
-        const tx = db.transaction(storeName, mode)
-        const store = tx.objectStore(storeName)
-        const req = fn(store)
-        req.onsuccess = () => resolve(req.result)
-        req.onerror = () => reject(req.error)
+        let result: T | undefined
+        let requestError: DOMException | null = null
+        let settled = false
+        const close = () => db.close()
+        const finish = (error?: unknown) => {
+          if (settled) return
+          settled = true
+          close()
+          if (error) {
+            reject(error)
+            return
+          }
+          resolve(result as T)
+        }
+
+        try {
+          const tx = db.transaction(storeName, mode)
+          tx.oncomplete = () => finish()
+          tx.onerror = () => finish(tx.error ?? requestError ?? new Error('IndexedDB 事务失败'))
+          tx.onabort = () => finish(tx.error ?? requestError ?? new Error('IndexedDB 事务已中止'))
+          const req = fn(tx.objectStore(storeName))
+          req.onsuccess = () => {
+            result = req.result
+          }
+          req.onerror = () => {
+            requestError = req.error
+          }
+        } catch (error) {
+          finish(error)
+        }
+      }),
+  )
+}
+
+function runBatchTransaction(
+  storeNames: string | string[],
+  fn: (tx: IDBTransaction) => void,
+): Promise<undefined> {
+  return openDB().then(
+    (db) =>
+      new Promise((resolve, reject) => {
+        let settled = false
+        const close = () => db.close()
+        const finish = (error?: unknown) => {
+          if (settled) return
+          settled = true
+          close()
+          if (error) reject(error)
+          else resolve(undefined)
+        }
+
+        try {
+          const tx = db.transaction(storeNames, 'readwrite')
+          tx.oncomplete = () => finish()
+          tx.onerror = () => finish(tx.error ?? new Error('IndexedDB 事务失败'))
+          tx.onabort = () => finish(tx.error ?? new Error('IndexedDB 事务已中止'))
+          fn(tx)
+        } catch (error) {
+          finish(error)
+        }
       }),
   )
 }
@@ -67,20 +122,13 @@ export function deleteTask(id: string): Promise<undefined> {
 }
 
 export function commitTaskDeletion(deletedTaskIds: string[], updatedTasks: TaskRecord[], updatedConversations: AgentConversation[]): Promise<undefined> {
-  return openDB().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS], 'readwrite')
-        const taskStore = tx.objectStore(STORE_TASKS)
-        const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
-        for (const id of deletedTaskIds) taskStore.delete(id)
-        for (const task of updatedTasks) taskStore.put(task)
-        for (const conversation of updatedConversations) conversationStore.put(conversation)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error)
-      }),
-  )
+  return runBatchTransaction([STORE_TASKS, STORE_AGENT_CONVERSATIONS], (tx) => {
+    const taskStore = tx.objectStore(STORE_TASKS)
+    const conversationStore = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+    for (const id of deletedTaskIds) taskStore.delete(id)
+    for (const task of updatedTasks) taskStore.put(task)
+    for (const conversation of updatedConversations) conversationStore.put(conversation)
+  })
 }
 
 export function clearTasks(): Promise<undefined> {
@@ -102,18 +150,11 @@ export function clearAgentConversations(): Promise<undefined> {
 }
 
 export function replaceAgentConversations(conversations: AgentConversation[]): Promise<undefined> {
-  return openDB().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction(STORE_AGENT_CONVERSATIONS, 'readwrite')
-        const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
-        store.clear()
-        for (const conversation of conversations) store.put(conversation)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-        tx.onabort = () => reject(tx.error)
-      }),
-  )
+  return runBatchTransaction(STORE_AGENT_CONVERSATIONS, (tx) => {
+    const store = tx.objectStore(STORE_AGENT_CONVERSATIONS)
+    store.clear()
+    for (const conversation of conversations) store.put(conversation)
+  })
 }
 
 // ===== Images =====
@@ -194,29 +235,17 @@ export function putImage(image: StoredImage): Promise<IDBValidKey> {
 }
 
 export function deleteImage(id: string): Promise<undefined> {
-  return openDB().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
-        tx.objectStore(STORE_IMAGES).delete(id)
-        tx.objectStore(STORE_THUMBNAILS).delete(id)
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-      }),
-  )
+  return runBatchTransaction([STORE_IMAGES, STORE_THUMBNAILS], (tx) => {
+    tx.objectStore(STORE_IMAGES).delete(id)
+    tx.objectStore(STORE_THUMBNAILS).delete(id)
+  })
 }
 
 export function clearImages(): Promise<undefined> {
-  return openDB().then(
-    (db) =>
-      new Promise((resolve, reject) => {
-        const tx = db.transaction([STORE_IMAGES, STORE_THUMBNAILS], 'readwrite')
-        tx.objectStore(STORE_IMAGES).clear()
-        tx.objectStore(STORE_THUMBNAILS).clear()
-        tx.oncomplete = () => resolve(undefined)
-        tx.onerror = () => reject(tx.error)
-      }),
-  )
+  return runBatchTransaction([STORE_IMAGES, STORE_THUMBNAILS], (tx) => {
+    tx.objectStore(STORE_IMAGES).clear()
+    tx.objectStore(STORE_THUMBNAILS).clear()
+  })
 }
 
 // ===== Image hashing & dedup =====

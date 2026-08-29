@@ -191,6 +191,7 @@ export async function fetchImageUrlAsDataUrl(url: string, fallbackMime: string, 
 
 export async function getApiErrorMessage(response: Response): Promise<string> {
   let errorMsg = `HTTP ${response.status}`
+  let requestId = response.headers.get('x-request-id')?.trim() ?? ''
   const textResponse = response.clone()
   try {
     const errJson = await response.json()
@@ -199,6 +200,7 @@ export async function getApiErrorMessage(response: Response): Promise<string> {
     else if (Array.isArray(errJson.detail)) errorMsg = errJson.detail.map((item: unknown) => typeof item === 'string' ? item : JSON.stringify(item)).join('\n')
     else if (typeof errJson.error === 'string') errorMsg = errJson.error
     else if (errJson.message) errorMsg = errJson.message
+    if (!requestId && typeof errJson.requestId === 'string') requestId = errJson.requestId.trim()
   } catch {
     try {
       errorMsg = await textResponse.text()
@@ -206,7 +208,7 @@ export async function getApiErrorMessage(response: Response): Promise<string> {
       /* ignore */
     }
   }
-  return errorMsg
+  return requestId && !errorMsg.includes(requestId) ? `${errorMsg}\n请求 ID：${requestId}` : errorMsg
 }
 
 export function pickActualParams(source: unknown): Partial<TaskParams> {

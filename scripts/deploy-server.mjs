@@ -26,6 +26,10 @@ const user = config.DEPLOY_SSH_USER?.trim() || 'root'
 const key = config.DEPLOY_SSH_KEY?.trim()
 const appRoot = config.DEPLOY_APP_ROOT?.trim() || '/www/wwwroot/img2.blackengine.top'
 const dryRun = process.argv.includes('--dry-run')
+const npmCommand = process.platform === 'win32' && process.env.npm_execpath ? (process.env.npm_node_execpath || process.execPath) : process.platform === 'win32' ? 'npm.cmd' : 'npm'
+const npmArgs = process.platform === 'win32' && process.env.npm_execpath
+  ? [process.env.npm_execpath, 'run', 'verify:release']
+  : ['run', 'verify:release']
 
 if (!host || !/^\d+$/.test(port) || !appRoot.startsWith('/') || appRoot === '/') {
   console.error('.deploy.local 中的服务器地址、端口或部署目录无效。')
@@ -62,7 +66,7 @@ if (key) {
   scpArgs.push('-i', key)
 }
 
-if (!process.argv.includes('--skip-verify')) run('npm', ['run', 'verify:release'])
+if (!process.argv.includes('--skip-verify')) run(npmCommand, npmArgs, { shell: process.platform === 'win32' && !process.env.npm_execpath })
 
 const workDir = mkdtempSync(join(tmpdir(), 'gpt-image-deploy-'))
 const bundle = join(workDir, 'release.tgz')

@@ -31,6 +31,7 @@ let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
 const gptChannels = new Set(['sixoner', 'catapi'])
 const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
+const MAX_BUFFERED_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
 const senseNovaSizes = new Set([
   '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
   '1760x2368', '2272x1824', '1824x2272', '3072x1376', '1344x3136',
@@ -439,6 +440,120 @@ function readBody(req, limit = 2 * 1024 * 1024) {
   })
 }
 
+class UpstreamPhaseError extends Error {
+  constructor(message, phase, cause) {
+    super(message, cause ? { cause } : undefined)
+    this.name = 'UpstreamPhaseError'
+    this.phase = phase
+  }
+}
+
+function isJsonContentType(contentType) {
+  return /(?:^|\/)json(?:;|$)|\+json(?:;|$)/i.test(String(contentType ?? '').trim())
+}
+
+function getMultipartAudit(body) {
+  const dispositionMarker = Buffer.from('Content-Disposition:')
+  const headerEndMarker = Buffer.from('\r\n\r\n')
+  const valueEndMarker = Buffer.from('\r\n--')
+  let offset = 0
+  let inputImageCount = 0
+  let inputImageBytes = 0
+  let hasMask = false
+
+  while (true) {
+    const dispositionIndex = body.indexOf(dispositionMarker, offset)
+    if (dispositionIndex < 0) break
+    const headerEnd = body.indexOf(headerEndMarker, dispositionIndex + dispositionMarker.length)
+    if (headerEnd < 0) break
+    const header = body.subarray(dispositionIndex, headerEnd).toString('latin1')
+    const name = header.match(/\bname="([^"]+)"/i)?.[1] ?? ''
+    const valueStart = headerEnd + headerEndMarker.length
+    const valueEnd = body.indexOf(valueEndMarker, valueStart)
+    const end = valueEnd < 0 ? body.length : valueEnd
+    const valueBytes = Math.max(0, end - valueStart)
+    if (name === 'image[]' || name === 'image') {
+      inputImageCount += 1
+      inputImageBytes += valueBytes
+    }
+    if (name === 'mask') hasMask = true
+    offset = end + valueEndMarker.length
+  }
+
+  return { inputImageCount, inputImageBytes, hasMask }
+}
+
+function getJsonAudit(payload) {
+  let inputImageCount = 0
+  let inputImageBytes = 0
+  let hasMask = false
+  const visit = (value, key = '') => {
+    if (typeof value === 'string') {
+      if (key === 'image_url' && value.startsWith('data:image/')) {
+        inputImageCount += 1
+        inputImageBytes += value.length
+      }
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    if (key === 'input_image_mask') hasMask = true
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, key)
+      return
+    }
+    for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey)
+  }
+  visit(payload)
+  return { inputImageCount, inputImageBytes, hasMask }
+}
+
+async function readUpstreamBody(response, limit = MAX_BUFFERED_JSON_RESPONSE_BYTES) {
+  const declaredLength = Number.parseInt(response.headers.get('content-length') ?? '', 10)
+  if (Number.isFinite(declaredLength) && declaredLength > limit) {
+    throw new UpstreamPhaseError(`上游响应体超过 ${Math.round(limit / 1024 / 1024)} MiB 限制`, 'response_body')
+  }
+
+  if (!response.body) return Buffer.alloc(0)
+  const reader = response.body.getReader()
+  const chunks = []
+  let total = 0
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      const chunk = Buffer.from(value)
+      total += chunk.length
+      if (total > limit) {
+        await reader.cancel().catch(() => {})
+        const error = new UpstreamPhaseError(`上游响应体超过 ${Math.round(limit / 1024 / 1024)} MiB 限制`, 'response_body')
+        error.responseBytes = total
+        throw error
+      }
+      chunks.push(chunk)
+    }
+  } catch (error) {
+    await reader.cancel().catch(() => {})
+    if (error instanceof UpstreamPhaseError) {
+      if (error.responseBytes == null) error.responseBytes = total
+      throw error
+    }
+    const phaseError = new UpstreamPhaseError(`上游响应体传输中断：${sanitizeError(error.message)}`, 'response_body', error)
+    phaseError.responseBytes = total
+    throw phaseError
+  } finally {
+    reader.releaseLock()
+  }
+  return Buffer.concat(chunks, total)
+}
+
+function validateJsonResponseBody(body) {
+  try {
+    JSON.parse(body.toString('utf8'))
+  } catch (error) {
+    throw new UpstreamPhaseError(`上游 JSON 响应不完整：${sanitizeError(error.message)}`, 'response_body', error)
+  }
+}
+
 app.post('/api-proxy/*path', async (req, res, next) => {
   if (req.headers['x-image-module'] !== 'sensenova-u1') return next()
 
@@ -632,11 +747,21 @@ app.post('/api-proxy/*path', async (req, res) => {
     let model = gptUpstream.model
     let body
     let payload = null
+    let requestBytes = 0
+    let inputImageCount = 0
+    let inputImageBytes = 0
+    let hasMask = false
+    const auditDetails = () => ({ endpoint, requestBytes, inputImageCount, inputImageBytes, hasMask })
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
         body = await readBody(req)
+        requestBytes = body.byteLength
         payload = JSON.parse(body.toString('utf8'))
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求内容必须是 JSON 对象')
+        const jsonAudit = getJsonAudit(payload)
+        inputImageCount = jsonAudit.inputImageCount
+        inputImageBytes = jsonAudit.inputImageBytes
+        hasMask = jsonAudit.hasMask
         if (endpoint === '/images/generations') {
           payload.output_format = 'png'
           delete payload.output_compression
@@ -649,6 +774,11 @@ app.post('/api-proxy/*path', async (req, res) => {
         if (endpoint.startsWith('/images/')) payload.n = 1
       } else {
         body = await readBody(req, 60 * 1024 * 1024)
+        requestBytes = body.byteLength
+        const multipartAudit = getMultipartAudit(body)
+        inputImageCount = multipartAudit.inputImageCount
+        inputImageBytes = multipartAudit.inputImageBytes
+        hasMask = multipartAudit.hasMask
         size = readMultipartTextField(body, 'size') || size
       }
       if (endpoint.startsWith('/images/')) {
@@ -699,30 +829,95 @@ app.post('/api-proxy/*path', async (req, res) => {
       let upstreamIndex = 0
       let fallbackStatus = null
       let response
-      while (true) {
-        try {
-          response = await sendUpstream(gptUpstream)
-        } catch (error) {
-          const nextUpstream = upstreamChain[upstreamIndex + 1]
-          if (!nextUpstream) throw error
-          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: nextUpstream.channel, message: sanitizeError(error.message) } })
-          upstreamIndex += 1
-          gptUpstream = nextUpstream
-          model = getUpstreamModel(gptUpstream, size)
-          routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
-          continue
-        }
-
-        const nextUpstream = upstreamChain[upstreamIndex + 1]
-        if (!nextUpstream || (!gptFallbackStatuses.has(response.status) && response.status < 500)) break
-        fallbackStatus = response.status
-        await response.body?.cancel()
-        addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { endpoint, model, from: gptUpstream.channel, to: nextUpstream.channel, upstreamStatus: fallbackStatus } })
+      let responseBody = null
+      let responseContentType = ''
+      let finalAttempt = null
+      const attempts = []
+      const attemptDetails = (attempt) => ({
+        ...auditDetails(),
+        channel: attempt.channel,
+        model: attempt.model,
+        attempt: attempt.attempt,
+        phase: attempt.phase,
+        ...(attempt.headersMs == null ? {} : { headersMs: attempt.headersMs }),
+        ...(attempt.bodyMs == null ? {} : { bodyMs: attempt.bodyMs }),
+        ...(attempt.deliveryMs == null ? {} : { deliveryMs: attempt.deliveryMs }),
+        ...(attempt.responseBytes == null ? {} : { responseBytes: attempt.responseBytes }),
+        ...(attempt.upstreamStatus == null ? {} : { upstreamStatus: attempt.upstreamStatus }),
+      })
+      const moveToNextUpstream = (nextUpstream) => {
         upstreamIndex += 1
         gptUpstream = nextUpstream
         model = getUpstreamModel(gptUpstream, size)
         routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
       }
+      while (true) {
+        const attempt = {
+          attempt: upstreamIndex + 1,
+          channel: gptUpstream.channel,
+          model: getUpstreamModel(gptUpstream, size),
+          phase: 'response_headers',
+          headersMs: null,
+          bodyMs: null,
+          deliveryMs: null,
+          responseBytes: null,
+          upstreamStatus: null,
+        }
+        attempts.push(attempt)
+        finalAttempt = attempt
+        const attemptStartedAt = Date.now()
+        try {
+          response = await sendUpstream(gptUpstream)
+          attempt.headersMs = Date.now() - attemptStartedAt
+          attempt.upstreamStatus = response.status
+        } catch (error) {
+          attempt.headersMs = Date.now() - attemptStartedAt
+          attempt.phase = error.phase ?? 'response_headers'
+          const message = sanitizeError(error.message)
+          const nextUpstream = upstreamChain[upstreamIndex + 1]
+          if (!nextUpstream) throw error
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, message } })
+          moveToNextUpstream(nextUpstream)
+          continue
+        }
+
+        const nextUpstream = upstreamChain[upstreamIndex + 1]
+        if (nextUpstream && (gptFallbackStatuses.has(response.status) || response.status >= 500)) {
+          fallbackStatus = response.status
+          attempt.phase = 'response_status'
+          await response.body?.cancel().catch(() => {})
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, upstreamStatus: fallbackStatus } })
+          moveToNextUpstream(nextUpstream)
+          continue
+        }
+
+        responseContentType = String(response.headers.get('content-type') ?? '').toLowerCase()
+        const shouldBufferResponse = !response.ok || isJsonContentType(responseContentType)
+        if (shouldBufferResponse) {
+          const bodyStartedAt = Date.now()
+          finalAttempt = attempt
+          attempt.phase = 'response_body'
+          try {
+            responseBody = await readUpstreamBody(response)
+            attempt.bodyMs = Date.now() - bodyStartedAt
+            attempt.responseBytes = responseBody.byteLength
+            if (response.ok && isJsonContentType(responseContentType)) validateJsonResponseBody(responseBody)
+          } catch (error) {
+            attempt.bodyMs = Date.now() - bodyStartedAt
+            attempt.phase = error.phase ?? 'response_body'
+            if (Number.isFinite(error.responseBytes)) attempt.responseBytes = error.responseBytes
+            const message = sanitizeError(error.message)
+            if (!nextUpstream) throw error
+            await response.body?.cancel().catch(() => {})
+            addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, message } })
+            moveToNextUpstream(nextUpstream)
+            continue
+          }
+        }
+        finalAttempt = attempt
+        break
+      }
+
       res.status(response.status)
       for (const name of ['content-type', 'cache-control']) {
         const value = response.headers.get(name)
@@ -731,18 +926,36 @@ app.post('/api-proxy/*path', async (req, res) => {
       res.setHeader('X-Request-Id', requestId)
       res.setHeader('X-Image-Upstream', gptUpstream.channel)
       res.setHeader('X-Image-Model', model)
-      const errorBody = response.ok ? null : Buffer.from(await response.arrayBuffer())
+      if (!responseBody && response.ok && !isJsonContentType(responseContentType)) res.setHeader('X-Accel-Buffering', 'no')
+      if (responseBody) res.setHeader('Content-Length', String(responseBody.byteLength))
+      const errorBody = response.ok ? null : responseBody
       const errorSummary = errorBody ? sanitizeError(errorBody.toString('utf8')) : ''
-      if (errorBody) {
-        const delivered = finished(res)
-        res.end(errorBody)
-        await delivered
-      } else if (response.body) {
-        await pipeline(Readable.fromWeb(response.body), res)
-      } else {
-        const delivered = finished(res)
-        res.end()
-        await delivered
+      const deliveryStartedAt = Date.now()
+      try {
+        if (responseBody) {
+          const delivered = finished(res)
+          res.end(responseBody)
+          await delivered
+        } else if (response.body) {
+          await pipeline(Readable.fromWeb(response.body), res)
+        } else {
+          const delivered = finished(res)
+          res.end()
+          await delivered
+        }
+      } catch (error) {
+        const phaseError = error instanceof UpstreamPhaseError
+          ? error
+          : new UpstreamPhaseError(`向浏览器返回响应时连接中断：${sanitizeError(error.message)}`, 'response_delivery', error)
+        if (finalAttempt) {
+          finalAttempt.phase = phaseError.phase
+          finalAttempt.deliveryMs = Date.now() - deliveryStartedAt
+        }
+        throw phaseError
+      }
+      if (finalAttempt) {
+        finalAttempt.deliveryMs = Date.now() - deliveryStartedAt
+        finalAttempt.phase = 'complete'
       }
       const durationMs = Date.now() - startedAt
       const status = response.ok ? 'success' : 'failed'
@@ -759,18 +972,22 @@ app.post('/api-proxy/*path', async (req, res) => {
         ipHash,
         status,
         durationMs,
-        details: { endpoint, model, imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, queueWaitMs: slot.waitedMs, ...(errorSummary ? { message: errorSummary } : {}) },
+        details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, routeAttempts: attempts.length, queueWaitMs: slot.waitedMs, ...(errorSummary ? { message: errorSummary } : {}) },
       })
     } catch (error) {
       const durationMs = Date.now() - startedAt
       const message = sanitizeError(error.message)
+      const phase = error.phase ?? 'unknown'
       db.prepare(`
         UPDATE generation_events
         SET model = ?, upstream_channel = ?, route_path = ?, status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
       `).run(model, gptUpstream.channel, routePath, durationMs, message, now(), requestId)
-      addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { endpoint, model, imageCount, channel: gptUpstream.channel, message } })
-      if (!res.headersSent) res.status(502).json({ error: '上游图片服务请求失败', requestId })
+      addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), endpoint, model, imageCount, channel: gptUpstream.channel, routeAttempts: attempts.length, phase, message } })
+      if (!res.headersSent) {
+        const phaseLabel = phase === 'response_body' ? '读取上游响应体' : phase === 'response_delivery' ? '返回浏览器' : '连接或等待上游响应'
+        res.status(502).json({ error: `上游图片服务在${phaseLabel}阶段失败，请稍后重试`, requestId, phase })
+      }
       else if (!res.destroyed && !res.writableEnded) res.end()
     }
   } finally {
