@@ -3,6 +3,8 @@ import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devP
 import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
+import { getProfileImageModule } from './imageModules'
+import { isServerManagedApi } from './serverManagedApi'
 
 export interface AgentApiResultImage {
   toolCallId?: string
@@ -103,6 +105,63 @@ function createHeaders(profile: ApiProfile): Record<string, string> {
   return {
     Authorization: `Bearer ${profile.apiKey}`,
     'Content-Type': 'application/json',
+  }
+}
+
+function encodeAuditHeader(value: string) {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary)
+}
+
+function containsInputImage(value: unknown): boolean {
+  if (!value || typeof value !== 'object') return false
+  if (Array.isArray(value)) return value.some(containsInputImage)
+  const record = value as Record<string, unknown>
+  if (record.type === 'input_image' || record.type === 'image_url' || record.input_image_mask) return true
+  return Object.values(record).some(containsInputImage)
+}
+
+function extractInputText(value: unknown, key = ''): string {
+  if (typeof value === 'string') return key === '' || key === 'text' || key === 'prompt' ? value : ''
+  if (!value || typeof value !== 'object') return ''
+  if (Array.isArray(value)) return value.map((item) => extractInputText(item, key)).filter(Boolean).join('\n')
+  const record = value as Record<string, unknown>
+  const ownText = typeof record.text === 'string' ? record.text : ''
+  return [ownText, ...Object.entries(record)
+    .filter(([childKey]) => childKey !== 'text' && childKey !== 'image_url' && childKey !== 'url' && childKey !== 'data')
+    .map(([childKey, child]) => extractInputText(child, childKey))]
+    .filter(Boolean)
+    .join('\n')
+}
+
+function createImageAuditHeaders({
+  profile,
+  imageProfile,
+  params,
+  input,
+  prompt,
+  inputImageCount,
+  maskDataUrl,
+}: {
+  profile: ApiProfile
+  imageProfile?: ApiProfile
+  params: TaskParams
+  input?: unknown
+  prompt?: string
+  inputImageCount?: number
+  maskDataUrl?: string
+}): Record<string, string> {
+  if (!isServerManagedApi()) return {}
+  const image = imageProfile ?? profile
+  const hasImages = (inputImageCount ?? 0) > 0 || Boolean(maskDataUrl) || containsInputImage(input)
+  const auditPrompt = (prompt || extractInputText(input)).trim().slice(0, 2000)
+  return {
+    'X-Image-Module': getProfileImageModule(image),
+    'X-Image-Action': hasImages ? 'edit' : 'generate',
+    'X-Image-Prompt-B64': encodeAuditHeader(auditPrompt),
+    'X-Image-Params-B64': encodeAuditHeader(JSON.stringify({ size: params.size, quality: params.quality, n: params.n })),
   }
 }
 
@@ -605,6 +664,7 @@ export async function callAgentResponsesApi(opts: {
   onImageToolFailed?: (event: AgentApiImageToolFailure) => void | Promise<void>
 }): Promise<AgentApiResult> {
   const { settings, profile, imageProfile, params, input, maskDataUrl, signal, onTextDelta, onOutputItems, onImageToolStarted, onImagePartialImage, onImageToolCompleted, onImageToolFailed } = opts
+  const effectiveImageProfile = imageProfile ?? profile
   const mime = MIME_MAP[params.output_format] || 'image/png'
   const proxyConfig = readClientDevProxyConfig()
   const useApiProxy = shouldUseApiProxy(profile.apiProxy, proxyConfig)
@@ -619,7 +679,7 @@ export async function callAgentResponsesApi(opts: {
       model: profile.model || settings.model,
       instructions: createAgentInstructions(settings, (imageProfile ?? profile).codexCli ? params.size : undefined),
       input,
-      tools: createAgentTools(params, profile, settings, maskDataUrl),
+      tools: createAgentTools(params, effectiveImageProfile, settings, maskDataUrl),
     }
     if (profile.reasoningEffort) body.reasoning = { effort: profile.reasoningEffort }
     if (profile.streamImages) {
@@ -628,7 +688,10 @@ export async function callAgentResponsesApi(opts: {
 
     const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
-      headers: createHeaders(profile),
+      headers: {
+        ...createHeaders(profile),
+        ...createImageAuditHeaders({ profile, imageProfile: effectiveImageProfile, params, input, maskDataUrl }),
+      },
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -639,7 +702,7 @@ export async function callAgentResponsesApi(opts: {
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
     }
 
-    if (profile.streamImages && isEventStreamResponse(response)) {
+    if (isEventStreamResponse(response)) {
       return parseAgentStreamResponse(response, mime, controller.signal, signal, onTextDelta, onOutputItems, onImageToolStarted, onImagePartialImage, onImageToolCompleted, onImageToolFailed)
     }
 
@@ -805,7 +868,10 @@ export async function callBatchImageSingle(opts: {
 
     const response = await fetch(buildApiUrl(profile.baseUrl, 'responses', proxyConfig, useApiProxy), {
       method: 'POST',
-      headers: createHeaders(profile),
+      headers: {
+        ...createHeaders(profile),
+        ...createImageAuditHeaders({ profile, params, input, prompt, inputImageCount: referenceImageDataUrls.length }),
+      },
       cache: 'no-store',
       body: JSON.stringify(body),
       signal: controller.signal,
@@ -817,7 +883,7 @@ export async function callBatchImageSingle(opts: {
     }
 
     // Handle streaming
-    if (profile.streamImages && isEventStreamResponse(response)) {
+    if (isEventStreamResponse(response)) {
       await onImageToolStarted?.()
       let completedImage: AgentApiResultImage | null = null
       let rawPayload: string | undefined

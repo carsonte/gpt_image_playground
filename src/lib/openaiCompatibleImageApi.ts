@@ -633,7 +633,8 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
     }
 
-    const result = profile.streamImages && isEventStreamResponse(response)
+    // 后台可能强制开启流式；以实际响应类型为准，避免把 SSE 当成 JSON 解析。
+    const result = isEventStreamResponse(response)
       ? await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
       : await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
     const requestId = response.headers.get('x-request-id')?.trim()
@@ -1080,7 +1081,8 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
       throw new Error(maybeAppendStreamingHint(errorMessage, response.status, profile.streamImages))
     }
 
-    if (profile.streamImages && isEventStreamResponse(response)) {
+    // 服务器策略可能在用户配置关闭时仍强制返回 SSE。
+    if (isEventStreamResponse(response)) {
       return parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
     }
 

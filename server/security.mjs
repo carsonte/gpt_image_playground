@@ -44,7 +44,7 @@ export function sanitizeError(value) {
 
 export function safeDetails(value) {
   const allowed = {}
-  for (const key of ['announcementId', 'blockId', 'version', 'deletedCount', 'endpoint', 'model', 'module', 'imageCount', 'inputLength', 'outputLength', 'requestBytes', 'inputImageCount', 'inputImageBytes', 'hasMask', 'responseBytes', 'phase', 'headersMs', 'bodyMs', 'deliveryMs', 'attempt', 'routeAttempts', 'upstreamStatus', 'fallbackStatus', 'channel', 'from', 'to', 'queueWaitMs', 'requestedQuality', 'responseQuality', 'qualityMismatch', 'outputQuality', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position', 'message']) {
+  for (const key of ['announcementId', 'blockId', 'version', 'deletedCount', 'endpoint', 'action', 'routeTier', 'routeGroup', 'model', 'module', 'imageCount', 'inputLength', 'outputLength', 'requestBytes', 'inputImageCount', 'inputImageBytes', 'hasMask', 'responseBytes', 'responseSize', 'phase', 'headersMs', 'bodyMs', 'deliveryMs', 'attempt', 'routeAttempts', 'upstreamStatus', 'fallbackStatus', 'channel', 'from', 'to', 'fallbackReason', 'queueWaitMs', 'requestedQuality', 'responseQuality', 'qualityMismatch', 'sizeMismatch', 'outputQuality', 'streamMode', 'streamEnabled', 'autoFallbackOnMismatch', 'requestedStream', 'effectiveStream', 'gptRoutes2k', 'gptRoutes4k', 'gptRoutesGenerate2k', 'gptRoutesGenerate4k', 'gptRoutesEdit2k', 'gptRoutesEdit4k', 'scope', 'concurrency', 'perIpConcurrency', 'perIpQueueLimit', 'position', 'message']) {
     if (value[key] !== undefined) allowed[key] = key === 'message' ? sanitizeError(value[key]) : value[key]
   }
   return JSON.stringify(allowed)

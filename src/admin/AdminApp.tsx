@@ -5,6 +5,12 @@ import {
   type Announcement,
   type AnnouncementDraft,
 } from '../lib/announcementApi'
+import GptRoutingControls, {
+  type GptAction,
+  type GptChannel,
+  type GptRoutes,
+  type RoutingSettings,
+} from './GptRoutingControls'
 
 type Tab = 'dashboard' | 'live' | 'generations' | 'optimization' | 'announcements' | 'ips' | 'logs' | 'settings'
 
@@ -56,10 +62,18 @@ type QueueSettings = {
   senseNovaActive: number
   senseNovaWaiting: number
   senseNovaConfigured: boolean
-  gptChannel: 'sixoner' | 'catapi'
+  gptChannel: 'primary' | 'sixoner' | 'catapi'
   primaryConfigured: boolean
   sixonerConfigured: boolean
   catApiConfigured: boolean
+  streamEnabled?: boolean
+  autoFallbackOnMismatch?: boolean
+  streamMode?: 'on' | 'off' | 'client' | 'force'
+  gptRoutes?: GptRoutes
+  recommendedStreamEnabled?: boolean
+  recommendedAutoFallbackOnMismatch?: boolean
+  recommendedGptRoutes?: GptRoutes
+  configured?: Partial<Record<GptChannel, boolean>>
 }
 
 type SiteSettings = {
@@ -158,6 +172,63 @@ const CHANNEL_NAMES: Record<string, string> = {
   sensenova: 'SenseNova',
 }
 
+const DEFAULT_ROUTE_LIST: GptChannel[] = ['sixoner', 'catapi', 'primary']
+const DEFAULT_GPT_ROUTES: GptRoutes = {
+  generate: { '2K': [...DEFAULT_ROUTE_LIST], '4K': [...DEFAULT_ROUTE_LIST] },
+  edit: { '2K': [...DEFAULT_ROUTE_LIST], '4K': [...DEFAULT_ROUTE_LIST] },
+}
+
+function normalizeRouteList(value: unknown, fallback: GptChannel[]) {
+  if (!Array.isArray(value)) return [...fallback]
+  const valid = value.filter((item): item is GptChannel => item === 'primary' || item === 'sixoner' || item === 'catapi')
+  const unique = [...new Set(valid)]
+  return unique.length ? unique : [...fallback]
+}
+
+function normalizeGptRoutes(value: unknown, fallback = DEFAULT_GPT_ROUTES): GptRoutes {
+  const input = value && typeof value === 'object' ? value as Partial<Record<GptAction, unknown>> : {}
+  const normalizeAction = (action: GptAction) => {
+    const actionValue = input[action]
+    if (!actionValue || typeof actionValue !== 'object' || Array.isArray(actionValue)) return {
+      '2K': [...fallback[action]['2K']],
+      '4K': [...fallback[action]['4K']],
+    }
+    const tiers = actionValue as Partial<Record<'2K' | '4K', unknown>>
+    return {
+      '2K': normalizeRouteList(tiers['2K'], fallback[action]['2K']),
+      '4K': normalizeRouteList(tiers['4K'], fallback[action]['4K']),
+    }
+  }
+  // 旧后台返回的是两档共用顺序，迁移到生成和编辑两组。
+  if ('2K' in input || '4K' in input) {
+    const legacy = input as Partial<Record<'2K' | '4K', unknown>>
+    const generate = {
+      '2K': normalizeRouteList(legacy['2K'], fallback.generate['2K']),
+      '4K': normalizeRouteList(legacy['4K'], fallback.generate['4K']),
+    }
+    return { generate, edit: { '2K': [...generate['2K']], '4K': [...generate['4K']] } }
+  }
+  return { generate: normalizeAction('generate'), edit: normalizeAction('edit') }
+}
+
+function normalizeRoutingSettings(settings: QueueSettings): RoutingSettings {
+  const gptRoutes = normalizeGptRoutes(settings.gptRoutes)
+  const recommendedGptRoutes = normalizeGptRoutes(settings.recommendedGptRoutes)
+  return {
+    streamEnabled: typeof settings.streamEnabled === 'boolean' ? settings.streamEnabled : settings.streamMode !== 'off',
+    autoFallbackOnMismatch: settings.autoFallbackOnMismatch === true,
+    gptRoutes,
+    recommendedStreamEnabled: settings.recommendedStreamEnabled !== false,
+    recommendedAutoFallbackOnMismatch: settings.recommendedAutoFallbackOnMismatch === true,
+    recommendedGptRoutes,
+    configured: {
+      primary: settings.configured?.primary ?? settings.primaryConfigured,
+      sixoner: settings.configured?.sixoner ?? settings.sixonerConfigured,
+      catapi: settings.configured?.catapi ?? settings.catApiConfigured,
+    },
+  }
+}
+
 function formatRoutePath(value: string) {
   if (!value) return '等待分配'
   return value.split('→').map((item) => CHANNEL_NAMES[item.trim()] ?? item.trim()).join(' → ')
@@ -228,32 +299,6 @@ function QueueLimitField({ label, hint, value, min, max, onChange }: QueueLimitF
   )
 }
 
-type GptRouteOptionProps = {
-  channel: QueueSettings['gptChannel']
-  name: string
-  route: string
-  description: string
-  selected: boolean
-  configured: boolean
-  onChange: (channel: QueueSettings['gptChannel']) => void
-}
-
-function GptRouteOption({ channel, name, route, description, selected, configured, onChange }: GptRouteOptionProps) {
-  return (
-    <label className={`flex min-h-28 cursor-pointer flex-col justify-between rounded-2xl border p-4 transition ${selected ? 'border-blue-500 bg-blue-50/70 ring-2 ring-blue-500/10 dark:bg-blue-500/[0.08]' : 'border-gray-200 bg-gray-50/70 hover:border-gray-300 dark:border-white/[0.08] dark:bg-white/[0.025] dark:hover:border-white/[0.16]'} ${configured ? '' : 'cursor-not-allowed opacity-50'}`}>
-      <span className="flex items-start justify-between gap-3">
-        <span>
-          <span className="block text-sm font-semibold">{name}</span>
-          <span className={`mt-1 block text-xs font-medium ${selected ? 'text-blue-900 dark:text-blue-100' : 'text-gray-700 dark:text-gray-200'}`}>{route}</span>
-          <span className={`mt-1.5 block text-xs leading-5 ${selected ? 'text-blue-700 dark:text-blue-200' : 'text-gray-500'}`}>{description}</span>
-        </span>
-        <input type="radio" name="gpt-channel" value={channel} checked={selected} disabled={!configured} onChange={() => onChange(channel)} className="mt-0.5 h-4 w-4 shrink-0 accent-blue-600" />
-      </span>
-      <span className={`mt-3 text-[11px] font-medium ${configured ? 'text-green-600 dark:text-green-300' : 'text-amber-600 dark:text-amber-300'}`}>{configured ? '主线路已配置' : '主线路尚未配置'}</span>
-    </label>
-  )
-}
-
 export default function AdminApp() {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
@@ -289,6 +334,8 @@ export default function AdminApp() {
   const [senseNovaPerIpQueueLimitInput, setSenseNovaPerIpQueueLimitInput] = useState('2')
   const [siteSettings, setSiteSettings] = useState<SiteSettings | null>(null)
   const [liveQueue, setLiveQueue] = useState<LiveQueueStatus | null>(null)
+  const [routingSettings, setRoutingSettings] = useState<RoutingSettings | null>(null)
+  const [routingResetPending, setRoutingResetPending] = useState(false)
 
   const loadDashboard = () => Promise.all([
     apiRequest<Summary>('/api/admin/stats/summary?period=30d'),
@@ -311,6 +358,7 @@ export default function AdminApp() {
     apiRequest<SiteSettings>('/api/admin/settings/site'),
   ]).then(([nextQueueSettings, nextSiteSettings]) => {
     setQueueSettings(nextQueueSettings)
+    setRoutingSettings(normalizeRoutingSettings(nextQueueSettings))
     setQueueConcurrency(String(nextQueueSettings.concurrency))
     setPerIpConcurrency(String(nextQueueSettings.perIpConcurrency))
     setPerIpQueueLimit(String(nextQueueSettings.perIpQueueLimit))
@@ -355,6 +403,7 @@ export default function AdminApp() {
     event.preventDefault()
     setError('')
     try {
+      const legacyChannel = routingSettings?.gptRoutes.generate['4K'].find((channel) => channel !== 'primary') ?? queueSettings?.gptChannel ?? 'sixoner'
       const result = await apiRequest<QueueSettings>('/api/admin/settings/queue', {
         method: 'PUT',
         body: JSON.stringify({
@@ -364,10 +413,14 @@ export default function AdminApp() {
           senseNovaConcurrency: Number(senseNovaConcurrencyInput),
           senseNovaPerIpConcurrency: Number(senseNovaPerIpConcurrencyInput),
           senseNovaPerIpQueueLimit: Number(senseNovaPerIpQueueLimitInput),
-          gptChannel: queueSettings?.gptChannel ?? 'sixoner',
+          gptChannel: legacyChannel,
+          streamEnabled: routingSettings?.streamEnabled ?? true,
+          autoFallbackOnMismatch: routingSettings?.autoFallbackOnMismatch ?? false,
+          gptRoutes: routingSettings?.gptRoutes ?? DEFAULT_GPT_ROUTES,
         }),
       })
       setQueueSettings(result)
+      setRoutingSettings(normalizeRoutingSettings(result))
       setQueueConcurrency(String(result.concurrency))
       setPerIpConcurrency(String(result.perIpConcurrency))
       setPerIpQueueLimit(String(result.perIpQueueLimit))
@@ -391,6 +444,23 @@ export default function AdminApp() {
       setSiteSettings(result)
     } catch (err) {
       setError(err instanceof Error ? err.message : '首页提示设置保存失败')
+    }
+  }
+
+  const resetRoutingSettings = async () => {
+    if (!window.confirm('恢复推荐的流式和 2K/4K 线路设置？只影响之后提交的新任务。')) return
+    setError('')
+    setRoutingResetPending(true)
+    try {
+      await apiRequest('/api/admin/settings/reset', {
+        method: 'POST',
+        body: JSON.stringify({ scope: 'routing' }),
+      })
+      await loadSettings()
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '恢复推荐设置失败')
+    } finally {
+      setRoutingResetPending(false)
     }
   }
 
@@ -641,45 +711,16 @@ export default function AdminApp() {
 
           {tab === 'settings' && (
             <section>
-              <div className="mb-6"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">先选择 GPT 生图线路，再分别设置两个模块的并发与单 IP 限额。</p></div>
+              <div className="mb-6"><h1 className="text-2xl font-bold">系统设置</h1><p className="mt-1 text-sm text-gray-500">管理流式策略、2K/4K 线路优先级，以及两个模块的并发与单 IP 限额。</p></div>
 
               <form onSubmit={saveQueueSettings} className="mb-6 rounded-2xl border border-gray-200 bg-white dark:border-white/[0.08] dark:bg-gray-900">
                 <div className="flex flex-wrap items-center justify-between gap-4 border-b border-gray-100 px-5 py-4 dark:border-white/[0.06]">
-                  <div><h2 className="font-bold">生图服务控制</h2><p className="mt-1 text-xs text-gray-500">线路选择和队列限制统一保存，两个模块仍使用各自独立的队列。</p></div>
+                  <div><h2 className="font-bold">生图服务控制</h2><p className="mt-1 text-xs text-gray-500">流式策略、线路选择和队列限制统一保存，两个模块仍使用各自独立的队列。</p></div>
                   <button type="submit" disabled={!queueSettings} className="rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">保存并应用</button>
                 </div>
 
                 <div className="p-5">
-                  {queueSettings && <fieldset>
-                    <div className="flex flex-wrap items-start justify-between gap-3">
-                      <div><legend className="font-semibold">GPT 生图路由</legend><p className="mt-1 text-xs leading-5 text-gray-500">系统按请求分辨率自动选模和选择线路，所有新任务固定输出 PNG。</p></div>
-                      <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${queueSettings.primaryConfigured ? 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300' : 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300'}`}>BlackEngine {queueSettings.primaryConfigured ? '备用可用' : '尚未配置'}</span>
-                    </div>
-                    <div className="mt-4 overflow-hidden rounded-xl border border-gray-200 dark:border-white/[0.08]">
-                      {[
-                        { tier: '2K', model: 'gpt-image-2-2k', route: queueSettings.catApiConfigured ? 'CatAPI → Sixoner → BlackEngine' : 'CatAPI 未配置，暂时沿用可用线路', fixed: queueSettings.catApiConfigured },
-                        { tier: '4K', model: 'gpt-image-2-4k', route: queueSettings.gptChannel === 'catapi' ? 'CatAPI → Sixoner → BlackEngine' : 'Sixoner → BlackEngine', fixed: false },
-                      ].map((item, idx) => (
-                        <div key={item.tier} className={`grid gap-2 px-4 py-3 sm:grid-cols-[48px_150px_minmax(0,1fr)_72px] sm:items-center ${idx ? 'border-t border-gray-100 dark:border-white/[0.06]' : ''}`}>
-                          <span className="text-sm font-bold text-gray-900 dark:text-white">{item.tier}</span>
-                          <code className="text-xs text-gray-500 dark:text-gray-400">{item.model}</code>
-                          <span className="text-xs font-medium text-gray-700 dark:text-gray-200">{item.route}</span>
-                          {item.fixed
-                            ? <span className="w-fit rounded-full bg-blue-50 px-2 py-1 text-[11px] font-medium text-blue-700 dark:bg-blue-500/10 dark:text-blue-300">固定优先</span>
-                            : <span className="w-fit rounded-full bg-gray-100 px-2 py-1 text-[11px] font-medium text-gray-500 dark:bg-white/[0.06] dark:text-gray-300">{item.tier === '2K' ? '待配置' : '跟随设置'}</span>}
-                        </div>
-                      ))}
-                    </div>
-                    <div className="mt-6">
-                      <h3 className="text-sm font-semibold">4K 主线路</h3>
-                      <p className="mt-1 text-xs leading-5 text-gray-500">这里只影响 4K；2K 始终优先 CatAPI，不受此选项影响。</p>
-                    </div>
-                    <div className="mt-3 grid gap-3 md:grid-cols-2">
-                      <GptRouteOption channel="sixoner" name="Sixoner 主线路" route="Sixoner → BlackEngine" description="适用于 4K；Sixoner 异常时回退 BlackEngine。" selected={queueSettings.gptChannel === 'sixoner'} configured={queueSettings.sixonerConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
-                      <GptRouteOption channel="catapi" name="CatAPI 主线路" route="CatAPI → Sixoner → BlackEngine" description="适用于 4K；按顺序自动回退两条备用线路。" selected={queueSettings.gptChannel === 'catapi'} configured={queueSettings.catApiConfigured} onChange={(channel) => setQueueSettings({ ...queueSettings, gptChannel: channel })} />
-                    </div>
-                    <div className="mt-3 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200"><span className="font-semibold">生效时间：</span>保存后只影响新提交的 4K 任务；正在生成和已经排队的任务不会中途换线。</div>
-                  </fieldset>}
+                  {routingSettings && <GptRoutingControls settings={routingSettings} onChange={setRoutingSettings} onReset={() => void resetRoutingSettings()} resetPending={routingResetPending} />}
 
                   <div className="mt-7 border-t border-gray-100 pt-6 dark:border-white/[0.06]">
                     <div><h3 className="font-semibold">并发与 IP 限流</h3><p className="mt-1 text-xs leading-5 text-gray-500">“生成中”持续到图片响应完整传输；单个 IP 达到运行和排队总上限后，新的请求会被拒绝。</p></div>

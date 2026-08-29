@@ -1,6 +1,6 @@
 import { createReadStream, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { finished, pipeline } from 'node:stream/promises'
 import { randomUUID } from 'node:crypto'
 import { isIP } from 'node:net'
@@ -16,6 +16,21 @@ import {
   sanitizeError,
   verifyPassword,
 } from './security.mjs'
+import {
+  GPT_CHANNELS,
+  RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH,
+  RECOMMENDED_GPT_ROUTES,
+  RECOMMENDED_STREAM_ENABLED,
+  cloneGptRoutes,
+  getRouteList,
+  migrateStoredGptRoutes,
+  normalizeAutoFallbackOnMismatch,
+  normalizeSubmittedGptRoutes,
+  normalizeStreamEnabled,
+  routesFromLegacyChannel,
+  streamEnabledFromLegacyMode,
+  streamModeFromEnabled,
+} from './gptRouting.mjs'
 
 const app = express()
 const distDir = resolve('./dist')
@@ -29,7 +44,7 @@ const senseNovaQueue = []
 const activeSenseNovaItems = new Map()
 let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
-const gptChannels = new Set(['sixoner', 'catapi'])
+const gptChannels = new Set(GPT_CHANNELS)
 const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
 const MAX_BUFFERED_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
 const imageQualityValues = new Set(['auto', 'low', 'medium', 'high'])
@@ -76,8 +91,25 @@ let senseNovaPerIpQueueLimit = Number.isFinite(savedSenseNovaPerIpQueueLimit)
 let privacyNoticeEnabled = readAppSetting('privacy_notice_enabled', 'true') === 'true'
 let privacyNoticeText = readAppSetting('privacy_notice_text', defaultPrivacyNotice)
 let queueStatusEnabled = readAppSetting('queue_status_enabled', 'true') === 'true'
-const savedGptChannel = readAppSetting('gpt_upstream_channel', 'sixoner')
+const savedGptChannel = readAppSetting('gpt_upstream_channel', '')
 let gptChannel = gptChannels.has(savedGptChannel) ? savedGptChannel : 'sixoner'
+const savedGptRoutesV2 = readAppSetting('gpt_routes_v2', '')
+const savedGptRoutesAlias = readAppSetting('gpt_routing_v2', '')
+const savedGptRoutes = migrateStoredGptRoutes({
+  // `gpt_routes_v2` 是正式键；兼容早期草稿曾写入的 `gpt_routing_v2`。
+  storedRoutes: savedGptRoutesV2,
+  storedRoutesAlias: savedGptRoutesAlias,
+  legacy2k: readAppSetting('gpt_routes_2k', ''),
+  legacy4k: readAppSetting('gpt_routes_4k', ''),
+  legacyChannel: savedGptChannel,
+}, RECOMMENDED_GPT_ROUTES)
+let gptRoutes = savedGptRoutes
+const savedStreamEnabled = readAppSetting('gpt_stream_enabled', '')
+const savedStreamMode = readAppSetting('gpt_stream_mode', '')
+let streamEnabled = savedStreamEnabled
+  ? normalizeStreamEnabled(savedStreamEnabled, RECOMMENDED_STREAM_ENABLED)
+  : streamEnabledFromLegacyMode(savedStreamMode, RECOMMENDED_STREAM_ENABLED)
+let autoFallbackOnMismatch = normalizeAutoFallbackOnMismatch(readAppSetting('gpt_auto_fallback_mismatch', ''), RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH)
 
 app.set('trust proxy', config.trustProxy)
 app.disable('x-powered-by')
@@ -159,6 +191,48 @@ function readResponseQuality(body) {
   return values.join(',')
 }
 
+function readResponseSize(body) {
+  let payload
+  try {
+    payload = JSON.parse(body.toString('utf8'))
+  } catch {
+    return ''
+  }
+  const values = []
+  const add = (value) => {
+    const normalized = String(value ?? '').trim().replace('×', 'x')
+    if (/^\d+\s*x\s*\d+$/i.test(normalized) && !values.includes(normalized)) values.push(normalized)
+  }
+  const addDimensions = (value) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return
+    add(value.size ?? value.resolution)
+    if (value.width != null && value.height != null) add(`${value.width}x${value.height}`)
+  }
+  if (payload && typeof payload === 'object') {
+    addDimensions(payload)
+    for (const key of ['data', 'output']) {
+      if (Array.isArray(payload[key])) {
+        for (const item of payload[key]) addDimensions(item)
+      }
+    }
+  }
+  return values.join(',')
+}
+
+function getResponseMismatch(responseQuality, responseSize, requestedQuality, requestedSize) {
+  const quality = normalizeImageQuality(requestedQuality, '')
+  const qualityMismatch = Boolean(
+    responseQuality && quality && quality !== 'auto'
+      && responseQuality.split(',').some((item) => item !== quality),
+  )
+  const requestedTier = getResolutionTier(requestedSize)
+  const sizeMismatch = Boolean(
+    responseSize && (requestedTier === '2K' || requestedTier === '4K')
+      && responseSize.split(',').some((item) => getResolutionTier(item) !== requestedTier),
+  )
+  return { qualityMismatch, sizeMismatch, mismatch: qualityMismatch || sizeMismatch }
+}
+
 function normalizeManagedGptSize(size) {
   const value = String(size ?? '').trim().toLowerCase().replace('×', 'x')
   if (getResolutionTier(value) !== '1K') return /^\d+x\d+$/.test(value) ? value : '2048x2048'
@@ -181,6 +255,74 @@ function getUpstreamModel(upstream, size) {
   if (upstream.channel === 'sixoner' && getResolutionTier(size) === '2K') return config.sixoner2kModel
   if (upstream.channel === 'sixoner' && getResolutionTier(size) === '4K') return config.sixoner4kModel
   return upstream.model
+}
+
+function getGptUpstreams() {
+  return {
+    primary: { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel },
+    sixoner: { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel },
+    catapi: { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel },
+  }
+}
+
+function getGptRouteTier(size) {
+  const tier = getResolutionTier(size)
+  return tier === '2K' || tier === '4K' ? tier : '4K'
+}
+
+function getGptUpstreamChain(routes, action, size) {
+  const upstreams = getGptUpstreams()
+  const tier = getGptRouteTier(size)
+  return getRouteList(routes, action, tier)
+    .map((channel) => upstreams[channel])
+    .filter((upstream) => upstream?.apiKey)
+}
+
+function getLegacyChannelFromRoutes(routes, fallback = gptChannel) {
+  return routes.generate['4K'].find((channel) => gptChannels.has(channel)) ?? fallback
+}
+
+function serializeGptRoutingSettings() {
+  return {
+    streamEnabled,
+    autoFallbackOnMismatch,
+    gptRoutes: cloneGptRoutes(gptRoutes),
+    recommendedStreamEnabled: RECOMMENDED_STREAM_ENABLED,
+    recommendedAutoFallbackOnMismatch: RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH,
+    recommendedGptRoutes: cloneGptRoutes(RECOMMENDED_GPT_ROUTES),
+    // 兼容旧版后台客户端；新客户端只使用 streamEnabled。
+    streamMode: streamModeFromEnabled(streamEnabled),
+    configured: {
+      primary: Boolean(config.upstreamApiKey),
+      sixoner: Boolean(config.sixonerApiKey),
+      catapi: Boolean(config.catApiKey),
+    },
+  }
+}
+
+function serializeQueueSettings() {
+  return {
+    concurrency: upstreamConcurrency,
+    perIpConcurrency,
+    perIpQueueLimit,
+    active: activeProxyRequests,
+    waiting: proxyQueue.length,
+    senseNovaConcurrency,
+    senseNovaPerIpConcurrency,
+    senseNovaPerIpQueueLimit,
+    senseNovaActive: activeSenseNovaRequests,
+    senseNovaWaiting: senseNovaQueue.length,
+    senseNovaConfigured: Boolean(config.senseNovaApiKey),
+    gptChannel,
+    primaryConfigured: Boolean(config.upstreamApiKey),
+    sixonerConfigured: Boolean(config.sixonerApiKey),
+    catApiConfigured: Boolean(config.catApiKey),
+    ...serializeGptRoutingSettings(),
+  }
+}
+
+function serializeSiteSettings() {
+  return { privacyNoticeEnabled, privacyNoticeText, queueStatusEnabled }
 }
 
 function replaceMultipartTextField(body, field, value) {
@@ -218,6 +360,51 @@ function setMultipartTextField(body, contentType, field, value) {
   if (closingIndex < 0) return body
   const fieldBody = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="${field}"\r\n\r\n${value}\r\n`)
   return Buffer.concat([body.subarray(0, closingIndex), fieldBody, body.subarray(closingIndex)])
+}
+
+function removeMultipartFields(body, contentType, fields) {
+  if (!fields.size) return body
+  const match = String(contentType).match(/boundary=(?:"([^"]+)"|([^;]+))/i)
+  const boundary = match?.[1] ?? match?.[2]?.trim()
+  if (!boundary) return body
+  const delimiter = `--${boundary}`
+  const text = body.toString('latin1')
+  const kept = text.split(delimiter).filter((part, index) => {
+    if (index === 0) return true
+    const headerEnd = part.indexOf('\r\n\r\n')
+    if (headerEnd < 0) return true
+    const header = part.slice(0, headerEnd)
+    const name = header.match(/\bname="([^"]+)"/i)?.[1]
+    return !name || !fields.has(name)
+  })
+  return Buffer.from(kept.join(delimiter), 'latin1')
+}
+
+function getRequestedStreamFromJson(payload) {
+  return payload?.stream === true || payload?.stream === 'true' || payload?.stream === 1
+}
+
+function applyJsonStreamPolicy(payload, enabledByServer) {
+  const requested = getRequestedStreamFromJson(payload)
+  const enabled = enabledByServer && requested
+  if (enabled) {
+    payload.stream = true
+    if (Array.isArray(payload.tools)) {
+      for (const tool of payload.tools) {
+        if (tool && typeof tool === 'object' && tool.type === 'image_generation' && tool.partial_images == null) tool.partial_images = 1
+      }
+    }
+    return { requested, enabled }
+  }
+
+  delete payload.stream
+  delete payload.partial_images
+  if (Array.isArray(payload.tools)) {
+    for (const tool of payload.tools) {
+      if (tool && typeof tool === 'object') delete tool.partial_images
+    }
+  }
+  return { requested, enabled: false }
 }
 
 function runProxyQueue() {
@@ -518,9 +705,12 @@ function getJsonAudit(payload) {
   let inputImageCount = 0
   let inputImageBytes = 0
   let hasMask = false
-  const visit = (value, key = '') => {
+  const countedImageObjects = new WeakSet()
+  const visit = (value, key = '', imageContext = false) => {
     if (typeof value === 'string') {
-      if (key === 'image_url' && value.startsWith('data:image/')) {
+      if (imageContext) {
+        if (value.startsWith('data:image/')) inputImageBytes += value.length
+      } else if (key === 'image_url' && value.startsWith('data:image/')) {
         inputImageCount += 1
         inputImageBytes += value.length
       }
@@ -528,14 +718,54 @@ function getJsonAudit(payload) {
     }
     if (!value || typeof value !== 'object') return
     if (key === 'input_image_mask') hasMask = true
+    const record = value
+    const isImageObject = record.type === 'input_image' || record.type === 'image_url'
+    if (isImageObject && !countedImageObjects.has(record)) {
+      countedImageObjects.add(record)
+      inputImageCount += 1
+    }
     if (Array.isArray(value)) {
-      for (const item of value) visit(item, key)
+      for (const item of value) visit(item, key, imageContext)
       return
     }
-    for (const [childKey, childValue] of Object.entries(value)) visit(childValue, childKey)
+    for (const [childKey, childValue] of Object.entries(record)) {
+      if (isImageObject && (childKey === 'image_url' || childKey === 'url')) {
+        if (typeof childValue === 'string' && childValue.startsWith('data:image/')) inputImageBytes += childValue.length
+        else if (childValue && typeof childValue === 'object') visit(childValue, childKey, true)
+        continue
+      }
+      visit(childValue, childKey, imageContext)
+    }
   }
   visit(payload)
   return { inputImageCount, inputImageBytes, hasMask }
+}
+
+function getJsonImageHints(payload) {
+  let size = typeof payload?.size === 'string' ? payload.size : ''
+  let quality = typeof payload?.quality === 'string' ? payload.quality : ''
+  let action = ''
+  const visit = (value) => {
+    if (typeof value === 'string') {
+      if (!size) size = value.match(/(?:generate at|resolution[: ]+)(\d+\s*[x×]\s*\d+)/i)?.[1] ?? ''
+      return
+    }
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item)
+      return
+    }
+    const record = value
+    if (record.type === 'image_generation') {
+      if (!size && typeof record.size === 'string') size = record.size
+      if (!quality && typeof record.quality === 'string') quality = record.quality
+      if (record.action === 'edit') action = 'edit'
+    }
+    if (record.type === 'input_image' || record.input_image_mask) action = 'edit'
+    for (const child of Object.values(record)) visit(child)
+  }
+  visit(payload)
+  return { size, quality, action }
 }
 
 async function readUpstreamBody(response, limit = MAX_BUFFERED_JSON_RESPONSE_BYTES) {
@@ -737,9 +967,6 @@ app.post('/api-proxy/*path', async (req, res) => {
     addLog({ requestId, level: 'warn', type: 'security', event: 'proxy.content_type_rejected', ipHash, status: 'rejected', details: { endpoint } })
     return res.status(415).json({ error: '请求格式不受支持', requestId })
   }
-  const primaryUpstream = { channel: 'primary', apiUrl: config.upstreamApiUrl, apiKey: config.upstreamApiKey, model: config.upstreamModel }
-  const sixonerUpstream = { channel: 'sixoner', apiUrl: config.sixonerApiUrl, apiKey: config.sixonerApiKey, model: config.sixonerModel }
-  const catApiUpstream = { channel: 'catapi', apiUrl: config.catApiUrl, apiKey: config.catApiKey, model: config.catApiModel }
   const auditParams = readParamsAudit(req)
   const auditedImageCount = Math.max(1, Number.parseInt(auditParams.n ?? 1, 10) || 1)
   if (auditedImageCount > 1) {
@@ -749,17 +976,9 @@ app.post('/api-proxy/*path', async (req, res) => {
   let prompt = readPromptAudit(req)
   let size = typeof auditParams.size === 'string' ? auditParams.size.slice(0, 40) : ''
   let quality = typeof auditParams.quality === 'string' ? auditParams.quality.slice(0, 40) : ''
-  const defaultRouteChannel = gptChannel === 'catapi' && !config.catApiKey ? 'sixoner' : gptChannel
-  const getGptUpstreamChain = (channel) => (channel === 'catapi'
-    ? [catApiUpstream, sixonerUpstream, primaryUpstream]
-    : [sixonerUpstream, primaryUpstream]
-  ).filter((upstream, idx) => idx === 0 || upstream.apiKey)
-  let routeChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
-  let upstreamChain = getGptUpstreamChain(routeChannel)
-  let gptUpstream = upstreamChain[0]
-  if (!gptUpstream.apiKey) return res.status(503).json({ error: `服务器尚未配置 ${gptUpstream.channel === 'catapi' ? 'CatAPI' : 'Sixoner'} API Key`, requestId })
   const requestedAction = String(req.headers['x-image-action'] ?? '')
-  const action = ['generate', 'edit'].includes(requestedAction) ? requestedAction : endpoint === '/images/edits' ? 'edit' : 'generate'
+  const hasExplicitAction = requestedAction === 'generate' || requestedAction === 'edit'
+  let action = hasExplicitAction ? requestedAction : endpoint === '/images/edits' ? 'edit' : 'generate'
   const activeForIp = [...activeProxyItems.values()].filter((item) => item.ipAddress === ipAddress).length
   const waitingForIp = proxyQueue.filter((item) => item.metadata.ipAddress === ipAddress).length
   if (activeForIp + waitingForIp >= perIpConcurrency + perIpQueueLimit) {
@@ -775,6 +994,14 @@ app.post('/api-proxy/*path', async (req, res) => {
   if (!slot) return
 
   try {
+    // 在真正获得执行槽位后快照；等待中的请求会使用后台最新设置。
+    const routingSnapshot = {
+      streamEnabled,
+      autoFallbackOnMismatch,
+      gptRoutes: cloneGptRoutes(gptRoutes),
+    }
+    let upstreamChain = []
+    let gptUpstream = getGptUpstreams().sixoner
     let model = gptUpstream.model
     let body
     let payload = null
@@ -782,7 +1009,12 @@ app.post('/api-proxy/*path', async (req, res) => {
     let inputImageCount = 0
     let inputImageBytes = 0
     let hasMask = false
-    const auditDetails = () => ({ endpoint, requestBytes, inputImageCount, inputImageBytes, hasMask, requestedQuality: quality })
+    let requestedStream = false
+    let effectiveStream = false
+    const auditDetails = () => {
+      const routeTier = getGptRouteTier(size)
+      return { endpoint, action, routeTier, routeGroup: `${action}:${routeTier}`, requestBytes, inputImageCount, inputImageBytes, hasMask, requestedQuality: quality, streamEnabled: routingSnapshot.streamEnabled, autoFallbackOnMismatch: routingSnapshot.autoFallbackOnMismatch, requestedStream, effectiveStream }
+    }
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
         body = await readBody(req)
@@ -793,6 +1025,11 @@ app.post('/api-proxy/*path', async (req, res) => {
         inputImageCount = jsonAudit.inputImageCount
         inputImageBytes = jsonAudit.inputImageBytes
         hasMask = jsonAudit.hasMask
+        const jsonHints = getJsonImageHints(payload)
+        if (!size && jsonHints.size) size = jsonHints.size.slice(0, 40)
+        if (!quality && jsonHints.quality) quality = jsonHints.quality.slice(0, 40)
+        if (!hasExplicitAction && endpoint === '/responses' && (inputImageCount > 0 || hasMask || jsonHints.action === 'edit')) action = 'edit'
+        if (endpoint === '/responses' && !size) size = '2048x2048'
         if (endpoint === '/images/generations') {
           payload.output_format = 'png'
           delete payload.output_compression
@@ -803,6 +1040,9 @@ app.post('/api-proxy/*path', async (req, res) => {
         const requestedImageCount = Math.max(1, Number.parseInt(payload.n ?? auditParams.n ?? 1, 10) || 1)
         if (requestedImageCount > 1) return res.status(400).json({ error: '当前服务每次只能生成 1 张图片', requestId })
         if (endpoint.startsWith('/images/')) payload.n = 1
+        const streamPolicy = applyJsonStreamPolicy(payload, routingSnapshot.streamEnabled)
+        requestedStream = streamPolicy.requested
+        effectiveStream = streamPolicy.enabled
       } else {
         body = await readBody(req, 60 * 1024 * 1024)
         requestBytes = body.byteLength
@@ -812,6 +1052,13 @@ app.post('/api-proxy/*path', async (req, res) => {
         hasMask = multipartAudit.hasMask
         size = readMultipartTextField(body, 'size') || size
         quality = readMultipartTextField(body, 'quality') || quality
+        requestedStream = ['true', '1', 'yes'].includes(readMultipartTextField(body, 'stream').toLowerCase())
+        effectiveStream = routingSnapshot.streamEnabled && requestedStream
+        if (effectiveStream) {
+          body = setMultipartTextField(body, req.headers['content-type'], 'stream', 'true')
+        } else {
+          body = removeMultipartFields(body, req.headers['content-type'], new Set(['stream', 'partial_images']))
+        }
       }
       if (endpoint.startsWith('/images/')) {
         size = normalizeManagedGptSize(size)
@@ -821,11 +1068,15 @@ app.post('/api-proxy/*path', async (req, res) => {
           payload.quality = quality
         }
       }
-      const requestedRouteChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
-      if (requestedRouteChannel !== routeChannel) {
-        routeChannel = requestedRouteChannel
-        upstreamChain = getGptUpstreamChain(routeChannel)
-        gptUpstream = upstreamChain[0]
+      if (endpoint === '/images/edits') action = 'edit'
+      const activeItem = activeProxyItems.get(requestId)
+      if (activeItem) Object.assign(activeItem, { action, prompt, size, imageCount })
+      upstreamChain = getGptUpstreamChain(routingSnapshot.gptRoutes, action, size)
+      gptUpstream = upstreamChain[0]
+      if (!gptUpstream) {
+        const tier = getGptRouteTier(size)
+        addLog({ requestId, level: 'error', type: 'request', event: 'image.proxy_error', ipHash, status: 'failed', durationMs: Date.now() - startedAt, details: { ...auditDetails(), phase: 'route_selection', message: `没有可用的 ${tier} 生图线路` } })
+        return res.status(503).json({ error: `服务器尚未配置可用的 ${tier} 生图线路`, requestId })
       }
       model = getUpstreamModel(gptUpstream, size)
     } catch (error) {
@@ -840,6 +1091,16 @@ app.post('/api-proxy/*path', async (req, res) => {
     `).run(requestId, ipHash, ipAddress, endpoint, action, model, gptUpstream.channel, gptUpstream.channel, prompt, size, getResolutionTier(size), quality, imageCount, now())
 
     let routePath = gptUpstream.channel
+    let response = null
+    let responseBody = null
+    let responseContentType = ''
+    let responseQuality = ''
+    let responseSize = ''
+    let qualityMismatch = false
+    let sizeMismatch = false
+    let fallbackStatus = null
+    let finalAttempt = null
+    const attempts = []
     try {
       const sendUpstream = (upstream) => {
         const upstreamModel = getUpstreamModel(upstream, size)
@@ -851,7 +1112,7 @@ app.post('/api-proxy/*path', async (req, res) => {
             )
         const headers = {
           Authorization: `Bearer ${upstream.apiKey}`,
-          Accept: req.headers.accept || 'application/json',
+          Accept: effectiveStream ? (req.headers.accept || 'text/event-stream, application/json') : 'application/json',
         }
         if (req.headers['content-type']) headers['Content-Type'] = req.headers['content-type']
         return fetch(`${upstream.apiUrl}${endpoint}`, {
@@ -863,13 +1124,6 @@ app.post('/api-proxy/*path', async (req, res) => {
         })
       }
       let upstreamIndex = 0
-      let fallbackStatus = null
-      let response
-      let responseBody = null
-      let responseContentType = ''
-      let responseQuality = ''
-      let finalAttempt = null
-      const attempts = []
       const attemptDetails = (attempt) => ({
         ...auditDetails(),
         channel: attempt.channel,
@@ -881,6 +1135,9 @@ app.post('/api-proxy/*path', async (req, res) => {
         ...(attempt.deliveryMs == null ? {} : { deliveryMs: attempt.deliveryMs }),
         ...(attempt.responseBytes == null ? {} : { responseBytes: attempt.responseBytes }),
         ...(attempt.responseQuality == null ? {} : { responseQuality: attempt.responseQuality }),
+        ...(attempt.responseSize == null ? {} : { responseSize: attempt.responseSize }),
+        ...(attempt.qualityMismatch == null ? {} : { qualityMismatch: attempt.qualityMismatch }),
+        ...(attempt.sizeMismatch == null ? {} : { sizeMismatch: attempt.sizeMismatch }),
         ...(attempt.upstreamStatus == null ? {} : { upstreamStatus: attempt.upstreamStatus }),
       })
       const moveToNextUpstream = (nextUpstream) => {
@@ -890,6 +1147,11 @@ app.post('/api-proxy/*path', async (req, res) => {
         routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
       }
       while (true) {
+        responseBody = null
+        responseQuality = ''
+        responseSize = ''
+        qualityMismatch = false
+        sizeMismatch = false
         const attempt = {
           attempt: upstreamIndex + 1,
           channel: gptUpstream.channel,
@@ -900,6 +1162,9 @@ app.post('/api-proxy/*path', async (req, res) => {
           deliveryMs: null,
           responseBytes: null,
           responseQuality: null,
+          responseSize: null,
+          qualityMismatch: null,
+          sizeMismatch: null,
           upstreamStatus: null,
         }
         attempts.push(attempt)
@@ -911,11 +1176,11 @@ app.post('/api-proxy/*path', async (req, res) => {
           attempt.upstreamStatus = response.status
         } catch (error) {
           attempt.headersMs = Date.now() - attemptStartedAt
-          attempt.phase = error.phase ?? 'response_headers'
+          attempt.phase = error.phase ?? 'connection'
           const message = sanitizeError(error.message)
           const nextUpstream = upstreamChain[upstreamIndex + 1]
           if (!nextUpstream) throw error
-          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, message } })
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, fallbackReason: attempt.phase, message } })
           moveToNextUpstream(nextUpstream)
           continue
         }
@@ -925,7 +1190,7 @@ app.post('/api-proxy/*path', async (req, res) => {
           fallbackStatus = response.status
           attempt.phase = 'response_status'
           await response.body?.cancel().catch(() => {})
-          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, upstreamStatus: fallbackStatus } })
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, fallbackReason: `http_${fallbackStatus}`, upstreamStatus: fallbackStatus } })
           moveToNextUpstream(nextUpstream)
           continue
         }
@@ -943,7 +1208,14 @@ app.post('/api-proxy/*path', async (req, res) => {
             if (response.ok && isJsonContentType(responseContentType)) {
               validateJsonResponseBody(responseBody)
               responseQuality = readResponseQuality(responseBody)
+              responseSize = readResponseSize(responseBody)
+              const mismatch = getResponseMismatch(responseQuality, responseSize, quality, size)
+              qualityMismatch = mismatch.qualityMismatch
+              sizeMismatch = mismatch.sizeMismatch
               attempt.responseQuality = responseQuality || null
+              attempt.responseSize = responseSize || null
+              attempt.qualityMismatch = qualityMismatch
+              attempt.sizeMismatch = sizeMismatch
             }
           } catch (error) {
             attempt.bodyMs = Date.now() - bodyStartedAt
@@ -952,10 +1224,17 @@ app.post('/api-proxy/*path', async (req, res) => {
             const message = sanitizeError(error.message)
             if (!nextUpstream) throw error
             await response.body?.cancel().catch(() => {})
-            addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, message } })
+            addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, fallbackReason: attempt.phase, message } })
             moveToNextUpstream(nextUpstream)
             continue
           }
+        }
+        if (routingSnapshot.autoFallbackOnMismatch && response.ok && isJsonContentType(responseContentType) && (qualityMismatch || sizeMismatch) && nextUpstream) {
+          attempt.phase = 'response_mismatch'
+          const fallbackReason = [qualityMismatch ? 'quality_mismatch' : '', sizeMismatch ? 'size_mismatch' : ''].filter(Boolean).join(',')
+          addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, fallbackReason } })
+          moveToNextUpstream(nextUpstream)
+          continue
         }
         finalAttempt = attempt
         break
@@ -973,7 +1252,6 @@ app.post('/api-proxy/*path', async (req, res) => {
       if (responseBody) res.setHeader('Content-Length', String(responseBody.byteLength))
       const errorBody = response.ok ? null : responseBody
       const errorSummary = errorBody ? sanitizeError(errorBody.toString('utf8')) : ''
-      const qualityMismatch = Boolean(responseQuality && quality && responseQuality !== quality)
       const deliveryStartedAt = Date.now()
       try {
         if (responseBody) {
@@ -981,7 +1259,15 @@ app.post('/api-proxy/*path', async (req, res) => {
           res.end(responseBody)
           await delivered
         } else if (response.body) {
-          await pipeline(Readable.fromWeb(response.body), res)
+          if (finalAttempt) finalAttempt.responseBytes = 0
+          const byteCounter = new Transform({
+            transform(chunk, _encoding, callback) {
+              const bytes = Buffer.from(chunk).byteLength
+              if (finalAttempt) finalAttempt.responseBytes = (finalAttempt.responseBytes ?? 0) + bytes
+              callback(null, chunk)
+            },
+          })
+          await pipeline(Readable.fromWeb(response.body), byteCounter, res)
         } else {
           const delivered = finished(res)
           res.end()
@@ -1016,7 +1302,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         ipHash,
         status,
         durationMs,
-        details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, routeAttempts: attempts.length, queueWaitMs: slot.waitedMs, ...(responseQuality ? { responseQuality, qualityMismatch } : {}), ...(errorSummary ? { message: errorSummary } : {}) },
+        details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, routeAttempts: attempts.length, queueWaitMs: slot.waitedMs, ...(responseQuality ? { responseQuality, qualityMismatch } : {}), ...(responseSize ? { responseSize, sizeMismatch } : {}), ...(errorSummary ? { message: errorSummary } : {}) },
       })
     } catch (error) {
       const durationMs = Date.now() - startedAt
@@ -1024,12 +1310,12 @@ app.post('/api-proxy/*path', async (req, res) => {
       const phase = error.phase ?? 'unknown'
       db.prepare(`
         UPDATE generation_events
-        SET model = ?, upstream_channel = ?, route_path = ?, status = 'failed', duration_ms = ?, error_summary = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, status = 'failed', upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(model, gptUpstream.channel, routePath, durationMs, message, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, finalAttempt?.upstreamStatus ?? null, durationMs, message, now(), requestId)
       addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), endpoint, model, imageCount, channel: gptUpstream.channel, routeAttempts: attempts.length, phase, message } })
       if (!res.headersSent) {
-        const phaseLabel = phase === 'response_body' ? '读取上游响应体' : phase === 'response_delivery' ? '返回浏览器' : '连接或等待上游响应'
+        const phaseLabel = phase === 'connection' ? '连接上游' : phase === 'response_headers' ? '等待上游响应头' : phase === 'response_body' ? '读取上游响应体' : phase === 'response_delivery' ? '返回浏览器' : '连接或等待上游响应'
         res.status(502).json({ error: `上游图片服务在${phaseLabel}阶段失败，请稍后重试`, requestId, phase })
       }
       else if (!res.destroyed && !res.writableEnded) res.end()
@@ -1161,10 +1447,15 @@ app.post('/api/prompt/optimize', async (req, res) => {
 })
 
 app.get('/api/health', (_req, res) => {
+  const configuredRoutes = Object.values(getGptUpstreams()).some((upstream) => upstream.apiKey)
   res.json({
     ok: true,
-    upstreamConfigured: Boolean(gptChannel === 'catapi' ? config.catApiKey : config.sixonerApiKey),
+    upstreamConfigured: configuredRoutes,
     gptChannel,
+    streamEnabled,
+    autoFallbackOnMismatch,
+    streamMode: streamModeFromEnabled(streamEnabled),
+    gptRoutes: cloneGptRoutes(gptRoutes),
     primaryConfigured: Boolean(config.upstreamApiKey),
     sixonerConfigured: Boolean(config.sixonerApiKey),
     catApiConfigured: Boolean(config.catApiKey),
@@ -1267,23 +1558,7 @@ app.post('/api/admin/logout', (req, res) => {
 })
 
 app.get('/api/admin/settings/queue', (_req, res) => {
-  res.json({
-    concurrency: upstreamConcurrency,
-    perIpConcurrency,
-    perIpQueueLimit,
-    active: activeProxyRequests,
-    waiting: proxyQueue.length,
-    senseNovaConcurrency,
-    senseNovaPerIpConcurrency,
-    senseNovaPerIpQueueLimit,
-    senseNovaActive: activeSenseNovaRequests,
-    senseNovaWaiting: senseNovaQueue.length,
-    senseNovaConfigured: Boolean(config.senseNovaApiKey),
-    gptChannel,
-    primaryConfigured: Boolean(config.upstreamApiKey),
-    sixonerConfigured: Boolean(config.sixonerApiKey),
-    catApiConfigured: Boolean(config.catApiKey),
-  })
+  res.json(serializeQueueSettings())
 })
 
 app.get('/api/admin/queue/tasks', (_req, res) => {
@@ -1330,13 +1605,46 @@ app.get('/api/admin/queue/tasks', (_req, res) => {
 })
 
 app.put('/api/admin/settings/queue', (req, res) => {
-  const concurrency = Number.parseInt(req.body.concurrency, 10)
-  const nextPerIpConcurrency = Number.parseInt(req.body.perIpConcurrency, 10)
-  const nextPerIpQueueLimit = Number.parseInt(req.body.perIpQueueLimit, 10)
-  const nextSenseNovaConcurrency = Number.parseInt(req.body.senseNovaConcurrency ?? senseNovaConcurrency, 10)
-  const nextSenseNovaPerIpConcurrency = Number.parseInt(req.body.senseNovaPerIpConcurrency ?? senseNovaPerIpConcurrency, 10)
-  const nextSenseNovaPerIpQueueLimit = Number.parseInt(req.body.senseNovaPerIpQueueLimit ?? senseNovaPerIpQueueLimit, 10)
-  const nextGptChannel = String(req.body.gptChannel ?? gptChannel)
+  const body = req.body && typeof req.body === 'object' ? req.body : {}
+  const parseInteger = (value, fallback) => value === undefined ? fallback : Number.parseInt(value, 10)
+  const concurrency = parseInteger(body.concurrency, upstreamConcurrency)
+  const nextPerIpConcurrency = parseInteger(body.perIpConcurrency, perIpConcurrency)
+  const nextPerIpQueueLimit = parseInteger(body.perIpQueueLimit, perIpQueueLimit)
+  const nextSenseNovaConcurrency = parseInteger(body.senseNovaConcurrency, senseNovaConcurrency)
+  const nextSenseNovaPerIpConcurrency = parseInteger(body.senseNovaPerIpConcurrency, senseNovaPerIpConcurrency)
+  const nextSenseNovaPerIpQueueLimit = parseInteger(body.senseNovaPerIpQueueLimit, senseNovaPerIpQueueLimit)
+  const hasGptRoutes = Object.prototype.hasOwnProperty.call(body, 'gptRoutes')
+  const hasGptChannel = Object.prototype.hasOwnProperty.call(body, 'gptChannel')
+  const nextGptChannel = String(body.gptChannel ?? gptChannel)
+  const parseToggle = (value, fallback, label) => {
+    if (value === undefined) return fallback
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase()
+      if (['true', '1', 'yes', 'on', 'client', 'force'].includes(normalized)) return true
+      if (['false', '0', 'no', 'off'].includes(normalized)) return false
+    }
+    throw new Error(`${label} 开关参数无效`)
+  }
+  let nextStreamEnabled
+  let nextAutoFallbackOnMismatch
+  let nextGptRoutes
+  try {
+    nextStreamEnabled = Object.prototype.hasOwnProperty.call(body, 'streamEnabled')
+      ? parseToggle(body.streamEnabled, streamEnabled, 'stream')
+      : parseToggle(body.streamMode, streamEnabled, 'stream')
+    nextAutoFallbackOnMismatch = parseToggle(body.autoFallbackOnMismatch, autoFallbackOnMismatch, '自动回退')
+    nextGptRoutes = hasGptRoutes
+      ? normalizeSubmittedGptRoutes(body.gptRoutes, gptRoutes)
+      : hasGptChannel
+        ? (() => {
+            if (!gptChannels.has(nextGptChannel)) throw new Error('GPT 生图渠道无效')
+            return routesFromLegacyChannel(nextGptChannel, gptRoutes)
+          })()
+        : cloneGptRoutes(gptRoutes)
+  } catch (error) {
+    return res.status(400).json({ error: sanitizeError(error.message) })
+  }
   if (!Number.isFinite(concurrency) || concurrency < 1 || concurrency > 20) {
     return res.status(400).json({ error: '并发数量必须是 1–20 的整数' })
   }
@@ -1355,14 +1663,29 @@ app.put('/api/admin/settings/queue', (req, res) => {
   if (!Number.isFinite(nextSenseNovaPerIpQueueLimit) || nextSenseNovaPerIpQueueLimit < 0 || nextSenseNovaPerIpQueueLimit > 100) {
     return res.status(400).json({ error: 'U1 单 IP 排队上限必须是 0–100 的整数' })
   }
-  if (!gptChannels.has(nextGptChannel)) {
-    return res.status(400).json({ error: 'GPT 生图渠道无效' })
-  }
-  if (nextGptChannel === 'sixoner' && !config.sixonerApiKey) {
-    return res.status(400).json({ error: '服务器尚未配置 Sixoner API Key' })
-  }
-  if (nextGptChannel === 'catapi' && !config.catApiKey) {
-    return res.status(400).json({ error: '服务器尚未配置 CatAPI API Key' })
+  const nextLegacyChannel = getLegacyChannelFromRoutes(nextGptRoutes, nextGptChannel)
+  try {
+    db.transaction(() => {
+      saveAppSetting('upstream_concurrency', concurrency)
+      saveAppSetting('per_ip_concurrency', nextPerIpConcurrency)
+      saveAppSetting('per_ip_queue_limit', nextPerIpQueueLimit)
+      saveAppSetting('sensenova_concurrency', nextSenseNovaConcurrency)
+      saveAppSetting('sensenova_per_ip_concurrency', nextSenseNovaPerIpConcurrency)
+      saveAppSetting('sensenova_per_ip_queue_limit', nextSenseNovaPerIpQueueLimit)
+      saveAppSetting('gpt_routes_v2', JSON.stringify(nextGptRoutes))
+      // 保留草稿键，便于已经运行过预发布版本的实例平滑回读。
+      saveAppSetting('gpt_routing_v2', JSON.stringify(nextGptRoutes))
+      saveAppSetting('gpt_stream_enabled', String(nextStreamEnabled))
+      saveAppSetting('gpt_auto_fallback_mismatch', String(nextAutoFallbackOnMismatch))
+      // 保留旧键，便于旧版本回滚后继续读取设置。
+      saveAppSetting('gpt_upstream_channel', nextLegacyChannel)
+      saveAppSetting('gpt_stream_mode', streamModeFromEnabled(nextStreamEnabled))
+      saveAppSetting('gpt_routes_2k', JSON.stringify(nextGptRoutes.generate['2K']))
+      saveAppSetting('gpt_routes_4k', JSON.stringify(nextGptRoutes.generate['4K']))
+    })()
+  } catch (error) {
+    addLog({ level: 'error', type: 'system', event: 'settings.queue_update_error', ipHash: getIpHash(req), status: 'failed', details: { message: sanitizeError(error.message) } })
+    return res.status(500).json({ error: '设置保存失败，请稍后重试' })
   }
   upstreamConcurrency = concurrency
   perIpConcurrency = nextPerIpConcurrency
@@ -1370,41 +1693,32 @@ app.put('/api/admin/settings/queue', (req, res) => {
   senseNovaConcurrency = nextSenseNovaConcurrency
   senseNovaPerIpConcurrency = nextSenseNovaPerIpConcurrency
   senseNovaPerIpQueueLimit = nextSenseNovaPerIpQueueLimit
-  gptChannel = nextGptChannel
-  const saveQueueSettings = db.transaction(() => {
-    saveAppSetting('upstream_concurrency', concurrency)
-    saveAppSetting('per_ip_concurrency', perIpConcurrency)
-    saveAppSetting('per_ip_queue_limit', perIpQueueLimit)
-    saveAppSetting('sensenova_concurrency', senseNovaConcurrency)
-    saveAppSetting('sensenova_per_ip_concurrency', senseNovaPerIpConcurrency)
-    saveAppSetting('sensenova_per_ip_queue_limit', senseNovaPerIpQueueLimit)
-    saveAppSetting('gpt_upstream_channel', gptChannel)
-  })
-  saveQueueSettings()
+  gptChannel = nextLegacyChannel
+  streamEnabled = nextStreamEnabled
+  autoFallbackOnMismatch = nextAutoFallbackOnMismatch
+  gptRoutes = nextGptRoutes
   runProxyQueue()
   runSenseNovaQueue()
-  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: { concurrency, perIpConcurrency, perIpQueueLimit, senseNovaConcurrency, senseNovaPerIpConcurrency, senseNovaPerIpQueueLimit, gptChannel } })
-  res.json({
-    concurrency: upstreamConcurrency,
-    perIpConcurrency,
-    perIpQueueLimit,
-    active: activeProxyRequests,
-    waiting: proxyQueue.length,
-    senseNovaConcurrency,
-    senseNovaPerIpConcurrency,
-    senseNovaPerIpQueueLimit,
-    senseNovaActive: activeSenseNovaRequests,
-    senseNovaWaiting: senseNovaQueue.length,
-    senseNovaConfigured: Boolean(config.senseNovaApiKey),
+  addLog({ type: 'admin', event: 'settings.queue_update', ipHash: getIpHash(req), status: 'success', details: {
+    concurrency,
+    perIpConcurrency: nextPerIpConcurrency,
+    perIpQueueLimit: nextPerIpQueueLimit,
+    senseNovaConcurrency: nextSenseNovaConcurrency,
+    senseNovaPerIpConcurrency: nextSenseNovaPerIpConcurrency,
+    senseNovaPerIpQueueLimit: nextSenseNovaPerIpQueueLimit,
     gptChannel,
-    primaryConfigured: Boolean(config.upstreamApiKey),
-    sixonerConfigured: Boolean(config.sixonerApiKey),
-    catApiConfigured: Boolean(config.catApiKey),
-  })
+    streamEnabled,
+    autoFallbackOnMismatch,
+    gptRoutesGenerate2k: gptRoutes.generate['2K'].join(','),
+    gptRoutesGenerate4k: gptRoutes.generate['4K'].join(','),
+    gptRoutesEdit2k: gptRoutes.edit['2K'].join(','),
+    gptRoutesEdit4k: gptRoutes.edit['4K'].join(','),
+  } })
+  res.json(serializeQueueSettings())
 })
 
 app.get('/api/admin/settings/site', (_req, res) => {
-  res.json({ privacyNoticeEnabled, privacyNoticeText, queueStatusEnabled })
+  res.json(serializeSiteSettings())
 })
 
 app.put('/api/admin/settings/site', (req, res) => {
@@ -1424,7 +1738,37 @@ app.put('/api/admin/settings/site', (req, res) => {
   })
   saveSiteSettings()
   addLog({ type: 'admin', event: 'settings.site_update', ipHash: getIpHash(req), status: 'success', details: { privacyNoticeEnabled, queueStatusEnabled } })
-  res.json({ privacyNoticeEnabled, privacyNoticeText, queueStatusEnabled })
+  res.json(serializeSiteSettings())
+})
+
+app.post('/api/admin/settings/reset', (req, res) => {
+  const requestedScope = String(req.body?.scope ?? '').trim().toLowerCase()
+  if (requestedScope !== 'routing') {
+    return res.status(400).json({ error: '恢复范围无效，应为 routing' })
+  }
+  const resetRoutes = cloneGptRoutes(RECOMMENDED_GPT_ROUTES)
+  const resetLegacyChannel = getLegacyChannelFromRoutes(resetRoutes, 'sixoner')
+  try {
+    db.transaction(() => {
+      saveAppSetting('gpt_routes_v2', JSON.stringify(resetRoutes))
+      saveAppSetting('gpt_routing_v2', JSON.stringify(resetRoutes))
+      saveAppSetting('gpt_stream_enabled', String(RECOMMENDED_STREAM_ENABLED))
+      saveAppSetting('gpt_auto_fallback_mismatch', String(RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH))
+      saveAppSetting('gpt_upstream_channel', resetLegacyChannel)
+      saveAppSetting('gpt_stream_mode', streamModeFromEnabled(RECOMMENDED_STREAM_ENABLED))
+      saveAppSetting('gpt_routes_2k', JSON.stringify(resetRoutes.generate['2K']))
+      saveAppSetting('gpt_routes_4k', JSON.stringify(resetRoutes.generate['4K']))
+    })()
+  } catch (error) {
+    addLog({ level: 'error', type: 'system', event: 'settings.reset_error', ipHash: getIpHash(req), status: 'failed', details: { message: sanitizeError(error.message) } })
+    return res.status(500).json({ error: '推荐设置恢复失败，请稍后重试' })
+  }
+  gptChannel = resetLegacyChannel
+  streamEnabled = RECOMMENDED_STREAM_ENABLED
+  autoFallbackOnMismatch = RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH
+  gptRoutes = resetRoutes
+  addLog({ type: 'admin', event: 'settings.reset', ipHash: getIpHash(req), status: 'success', details: { scope: 'routing' } })
+  res.json({ scope: 'routing', queue: serializeQueueSettings(), routing: serializeGptRoutingSettings() })
 })
 
 app.get('/api/admin/announcements', (_req, res) => {

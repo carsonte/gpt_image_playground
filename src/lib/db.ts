@@ -60,7 +60,7 @@ function dbTransaction<T>(
 
         try {
           const tx = db.transaction(storeName, mode)
-          tx.oncomplete = () => finish()
+          tx.oncomplete = () => finish(requestError ?? undefined)
           tx.onerror = () => finish(tx.error ?? requestError ?? new Error('IndexedDB 事务失败'))
           tx.onabort = () => finish(tx.error ?? requestError ?? new Error('IndexedDB 事务已中止'))
           const req = fn(tx.objectStore(storeName))
