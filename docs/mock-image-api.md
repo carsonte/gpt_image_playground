@@ -33,6 +33,7 @@ $env:MOCK_IMAGE_API_PORT="8788"; npm run mock:api
 - `http://127.0.0.1:8787/url-cors-block`：API 请求成功，但返回的图片 URL 没有 CORS 头，浏览器下载图片时失败。
 - `http://127.0.0.1:8787/url-ok`：API 请求成功，图片 URL 有 CORS 头，应该生成成功。
 - `http://127.0.0.1:8787/b64`：API 直接返回 `b64_json`，应该生成成功。
+- `http://127.0.0.1:8787/quality-low`：API 返回 `b64_json` 并明确标记 `quality=low`，可验证请求质量与实际上游质量不一致的诊断展示。
 - `http://127.0.0.1:8787/wrong-shape`：返回类似 `data.url` 的非 OpenAI JSON，不符合 OpenAI `data[]` 结构，应显示“查看原始响应内容”。
 - `http://127.0.0.1:8787/no-recognizable`：返回 `data[]`，但没有 `url` 或 `b64_json`，应显示“查看原始响应内容”。
 - `http://127.0.0.1:8787/empty`：返回空 `data[]`，应显示“查看原始响应内容”。

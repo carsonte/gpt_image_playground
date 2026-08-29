@@ -74,6 +74,7 @@ db.exec(`
     resolution_tier TEXT NOT NULL DEFAULT 'other',
     output_size TEXT NOT NULL DEFAULT '',
     output_resolution_tier TEXT NOT NULL DEFAULT 'other',
+    output_quality TEXT NOT NULL DEFAULT '',
     quality TEXT NOT NULL DEFAULT '',
     image_count INTEGER NOT NULL DEFAULT 1,
     status TEXT NOT NULL CHECK (status IN ('started', 'success', 'failed')),
@@ -132,4 +133,5 @@ ensureColumn('generation_events', 'size', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'resolution_tier', "TEXT NOT NULL DEFAULT 'other'")
 ensureColumn('generation_events', 'output_size', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'output_resolution_tier', "TEXT NOT NULL DEFAULT 'other'")
+ensureColumn('generation_events', 'output_quality', "TEXT NOT NULL DEFAULT ''")
 ensureColumn('generation_events', 'quality', "TEXT NOT NULL DEFAULT ''")

@@ -142,6 +142,7 @@ type GenerationRecord = {
   resolutionTier: string
   outputSize: string
   outputResolutionTier: string
+  outputQuality: string
   quality: string
   imageCount: number
   status: 'started' | 'success' | 'failed'
@@ -740,7 +741,7 @@ export default function AdminApp() {
                       <div><div className="text-gray-400">实际输出</div><div className={`mt-1 font-semibold ${item.outputSize ? 'text-gray-800 dark:text-gray-100' : 'text-amber-600 dark:text-amber-300'}`}>{item.outputSize || (item.status === 'success' ? '等待浏览器回报' : '—')} {item.outputSize && <span className="font-normal text-gray-500">· {item.outputResolutionTier === 'other' ? '其他' : item.outputResolutionTier}</span>}</div></div>
                       <div><div className="text-gray-400">耗时 / 模型</div><div className="mt-1 font-semibold text-gray-800 dark:text-gray-100">{formatDuration(item.durationMs)} <span className="font-normal text-gray-500">· {item.model || '—'}</span></div></div>
                     </div>
-                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-gray-400"><span>质量：{item.quality || '—'}</span><span>数量：{item.imageCount}</span><span className="font-mono">ID：{item.requestId}</span></div>
+                    <div className="mt-3 flex flex-wrap gap-x-5 gap-y-1 text-[11px] text-gray-400"><span>请求质量：{item.quality || '—'}</span>{item.outputQuality && <span className={item.outputQuality !== item.quality ? 'font-semibold text-amber-600 dark:text-amber-300' : ''}>实际上游质量：{item.outputQuality}</span>}<span>数量：{item.imageCount}</span><span className="font-mono">ID：{item.requestId}</span></div>
                     {item.status === 'failed' && item.errorSummary && <div className="mt-3 border-l-2 border-red-400 pl-3 text-xs leading-5 text-red-600 dark:text-red-300">{item.errorSummary}</div>}
                   </article>
                 ))}

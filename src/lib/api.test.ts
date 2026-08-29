@@ -305,6 +305,25 @@ describe('callImageApi', () => {
     }])
   })
 
+  it('keeps per-image quality returned inside Images API data items', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      data: [{ b64_json: 'aW1hZ2U=', quality: 'low', size: '1024x1024' }],
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+
+    const result = await callImageApi({
+      settings: { ...DEFAULT_SETTINGS, apiKey: 'test-key' },
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, quality: 'high' },
+      inputImageDataUrls: [],
+    })
+
+    expect(result.actualParams).toMatchObject({ quality: 'low', size: '1024x1024' })
+    expect(result.actualParamsList).toEqual([{ quality: 'low', size: '1024x1024' }])
+  })
+
   it('streams Images API partial images and resolves the final completed image', async () => {
     const streamBody = [
       'data: {"type":"image_generation.partial_image","partial_image_index":0,"b64_json":"cGFydGlhbA=="}',

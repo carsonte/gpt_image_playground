@@ -50,6 +50,13 @@ const upstream = createServer(async (req, res) => {
     }, 50)
     return
   }
+  if (payload?.prompt === '质量参数诊断测试') {
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ quality: 'low', data: [{ b64_json: 'bG93LXF1YWxpdHk=' }] }))
+    upstreamActive -= 1
+    return
+  }
   await new Promise((resolve) => setTimeout(resolve, 120))
   const shouldFailCatApi = req.url === '/catapi/v1/images/generations' && ['一只戴墨镜的橘猫', 'CatAPI 转 Sixoner 测试'].includes(payload?.prompt)
   const shouldFailSixoner = req.url === '/sixoner/v1/images/generations' && payload?.prompt === '一只戴墨镜的橘猫'
@@ -222,7 +229,7 @@ try {
   if (!upstreamPaths.includes('/catapi/v1/images/generations')) throw new Error('GPT 请求未转发到 CatAPI 线路')
   if (!upstreamPaths.includes('/sixoner/v1/images/generations') || !upstreamPaths.includes('/v1/images/generations') || gptImageResult.response.headers.get('x-image-upstream') !== 'primary') throw new Error('CatAPI 和 Sixoner 失败后未自动转发到 BlackEngine 备用线路')
   const fallbackPayloads = upstreamPayloads.filter((item) => item.prompt === '一只戴墨镜的橘猫')
-  if (fallbackPayloads[0]?.model !== 'gpt-image-2-4k' || fallbackPayloads[1]?.model !== 'gpt-image-2-4k' || fallbackPayloads[2]?.model !== 'gpt-image-2' || gptImageResult.response.headers.get('x-image-model') !== 'gpt-image-2') throw new Error('4K 回退请求未按各渠道模型分别转发')
+  if (fallbackPayloads[0]?.model !== 'gpt-image-2-4k' || fallbackPayloads[1]?.model !== 'gpt-image-2-4k' || fallbackPayloads[2]?.model !== 'gpt-image-2' || fallbackPayloads.some((item) => item.quality !== 'high') || gptImageResult.response.headers.get('x-image-model') !== 'gpt-image-2') throw new Error('4K 回退请求未按各渠道模型和质量分别转发')
   const fallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
   if (fallbackLogs.payload.total !== 2 || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'catapi' && item.details?.to === 'sixoner') || !fallbackLogs.payload.logs.some((item) => item.details?.from === 'sixoner' && item.details?.to === 'primary')) throw new Error('GPT 生图三级回退日志不正确')
   await request('/api/generation-result', {
@@ -371,10 +378,36 @@ try {
   const edit4kBody = upstreamBodies.findLast((item) => item.path === '/catapi/v1/images/edits')?.text ?? ''
   if (!edit4kBody.includes('name="model"\r\n\r\ngpt-image-2-4k\r\n')) throw new Error('CatAPI 4K 编辑请求未使用专用模型')
   if (!edit4kBody.includes('name="output_format"\r\n\r\npng\r\n') || edit4kBody.includes('name="output_format"\r\n\r\nwebp\r\n')) throw new Error('GPT 编辑请求未强制使用 PNG')
+  if (!edit4kBody.includes('name="quality"\r\n\r\nhigh\r\n')) throw new Error('GPT 编辑请求未补齐 high 质量参数')
   if (!edit4kBody.includes('name="n"\r\n\r\n1\r\n')) throw new Error('GPT 编辑请求未强制使用单张输出')
   if (!edit4kBody.includes('name="image[]"; filename="test.png"')) throw new Error('GPT 编辑请求未携带输入图片')
   const editGeneration = await request('/api/admin/generations?q=CatAPI%204K%20编辑模型路由测试', { headers: { Cookie: cookie } })
   if (editGeneration.payload.items[0]?.action !== 'edit' || editGeneration.payload.items[0]?.endpoint !== '/images/edits') throw new Error('GPT 编辑请求未被后台识别为编辑图片')
+
+  const qualityResult = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '质量参数诊断测试', size: '2880x2880', quality: 'high', n: 1 }),
+  })
+  const qualityPayload = upstreamPayloads.find((item) => item.prompt === '质量参数诊断测试')
+  if (qualityPayload?.quality !== 'high') throw new Error('GPT 请求未保留 high 质量参数')
+  const qualityLogs = await request(`/api/admin/logs?requestId=${qualityResult.response.headers.get('x-request-id')}`, { headers: { Cookie: cookie } })
+  const qualityLog = qualityLogs.payload.logs.find((item) => item.event === 'image.proxy')
+  if (qualityLog?.details?.requestedQuality !== 'high' || qualityLog?.details?.responseQuality !== 'low' || qualityLog?.details?.qualityMismatch !== true) throw new Error('上游质量不一致未记录诊断字段')
+  const qualityGeneration = await request('/api/admin/generations?q=质量参数诊断测试', { headers: { Cookie: cookie } })
+  if (qualityGeneration.payload.items[0]?.quality !== 'high' || qualityGeneration.payload.items[0]?.outputQuality !== 'low') throw new Error('生成记录未保存请求和实际上游质量')
+  await request('/api/generation-result', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId: qualityResult.response.headers.get('x-request-id'), outputQuality: 'low' }),
+  })
+  await request('/api/generation-result', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ requestId: qualityResult.response.headers.get('x-request-id'), outputSize: '1x1' }),
+  })
+  const qualityGenerationAfterReport = await request('/api/admin/generations?q=质量参数诊断测试', { headers: { Cookie: cookie } })
+  if (qualityGenerationAfterReport.payload.items[0]?.outputSize !== '1x1') throw new Error('生成结果回报未接受单数字尺寸')
 
   const usage = await request('/api/admin/ip-usage?period=30d', { headers: { Cookie: cookie } })
   const localIp = usage.payload.items.find((item) => item.ipAddress === '127.0.0.1')

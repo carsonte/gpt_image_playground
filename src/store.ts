@@ -3621,7 +3621,7 @@ async function executeTask(taskId: string) {
       outputImageSizes,
     )
     const actualParams = deriveGalleryActualParams(taskProvider, isAsyncCustomTask, result.actualParams, actualParamsList, outputIds.length)
-    void reportManagedGenerationResult(result.requestId, actualParamsList[0]?.size)
+    void reportManagedGenerationResult(result.requestId, actualParamsList[0]?.size, actualParamsList[0]?.quality)
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
     const revisedPrompts = activeProfile.codexCli && task.sourceMode !== 'agent'

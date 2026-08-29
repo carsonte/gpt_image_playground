@@ -32,6 +32,7 @@ const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不�
 const gptChannels = new Set(['sixoner', 'catapi'])
 const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
 const MAX_BUFFERED_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
+const imageQualityValues = new Set(['auto', 'low', 'medium', 'high'])
 const senseNovaSizes = new Set([
   '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
   '1760x2368', '2272x1824', '1824x2272', '3072x1376', '1344x3136',
@@ -126,6 +127,36 @@ function getResolutionTier(size) {
   if (edge <= 2560) return '2K'
   if (edge <= 4096) return '4K'
   return 'other'
+}
+
+function normalizeImageQuality(value, fallback = 'high') {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  return imageQualityValues.has(normalized) ? normalized : fallback
+}
+
+function readResponseQuality(body) {
+  let payload
+  try {
+    payload = JSON.parse(body.toString('utf8'))
+  } catch {
+    return ''
+  }
+
+  const values = []
+  const add = (value) => {
+    const normalized = String(value ?? '').trim().toLowerCase()
+    if (imageQualityValues.has(normalized) && !values.includes(normalized)) values.push(normalized)
+  }
+  if (payload && typeof payload === 'object') {
+    add(payload.quality)
+    if (Array.isArray(payload.data)) {
+      for (const item of payload.data) add(item?.quality)
+    }
+    if (Array.isArray(payload.output)) {
+      for (const item of payload.output) add(item?.quality)
+    }
+  }
+  return values.join(',')
 }
 
 function normalizeManagedGptSize(size) {
@@ -751,7 +782,7 @@ app.post('/api-proxy/*path', async (req, res) => {
     let inputImageCount = 0
     let inputImageBytes = 0
     let hasMask = false
-    const auditDetails = () => ({ endpoint, requestBytes, inputImageCount, inputImageBytes, hasMask })
+    const auditDetails = () => ({ endpoint, requestBytes, inputImageCount, inputImageBytes, hasMask, requestedQuality: quality })
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
         body = await readBody(req)
@@ -780,10 +811,15 @@ app.post('/api-proxy/*path', async (req, res) => {
         inputImageBytes = multipartAudit.inputImageBytes
         hasMask = multipartAudit.hasMask
         size = readMultipartTextField(body, 'size') || size
+        quality = readMultipartTextField(body, 'quality') || quality
       }
       if (endpoint.startsWith('/images/')) {
         size = normalizeManagedGptSize(size)
-        if (payload) payload.size = size
+        quality = normalizeImageQuality(quality)
+        if (payload) {
+          payload.size = size
+          payload.quality = quality
+        }
       }
       const requestedRouteChannel = getResolutionTier(size) === '2K' && config.catApiKey ? 'catapi' : defaultRouteChannel
       if (requestedRouteChannel !== routeChannel) {
@@ -809,7 +845,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         const upstreamModel = getUpstreamModel(upstream, size)
         const upstreamBody = payload
           ? Buffer.from(JSON.stringify({ ...payload, model: upstreamModel }))
-          : [['output_format', 'png'], ['n', '1'], ['size', size], ['model', upstreamModel]].reduce(
+          : [['output_format', 'png'], ['n', '1'], ['size', size], ['quality', quality], ['model', upstreamModel]].reduce(
               (result, [field, value]) => setMultipartTextField(result, req.headers['content-type'], field, value),
               body,
             )
@@ -831,6 +867,7 @@ app.post('/api-proxy/*path', async (req, res) => {
       let response
       let responseBody = null
       let responseContentType = ''
+      let responseQuality = ''
       let finalAttempt = null
       const attempts = []
       const attemptDetails = (attempt) => ({
@@ -843,6 +880,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         ...(attempt.bodyMs == null ? {} : { bodyMs: attempt.bodyMs }),
         ...(attempt.deliveryMs == null ? {} : { deliveryMs: attempt.deliveryMs }),
         ...(attempt.responseBytes == null ? {} : { responseBytes: attempt.responseBytes }),
+        ...(attempt.responseQuality == null ? {} : { responseQuality: attempt.responseQuality }),
         ...(attempt.upstreamStatus == null ? {} : { upstreamStatus: attempt.upstreamStatus }),
       })
       const moveToNextUpstream = (nextUpstream) => {
@@ -861,6 +899,7 @@ app.post('/api-proxy/*path', async (req, res) => {
           bodyMs: null,
           deliveryMs: null,
           responseBytes: null,
+          responseQuality: null,
           upstreamStatus: null,
         }
         attempts.push(attempt)
@@ -901,7 +940,11 @@ app.post('/api-proxy/*path', async (req, res) => {
             responseBody = await readUpstreamBody(response)
             attempt.bodyMs = Date.now() - bodyStartedAt
             attempt.responseBytes = responseBody.byteLength
-            if (response.ok && isJsonContentType(responseContentType)) validateJsonResponseBody(responseBody)
+            if (response.ok && isJsonContentType(responseContentType)) {
+              validateJsonResponseBody(responseBody)
+              responseQuality = readResponseQuality(responseBody)
+              attempt.responseQuality = responseQuality || null
+            }
           } catch (error) {
             attempt.bodyMs = Date.now() - bodyStartedAt
             attempt.phase = error.phase ?? 'response_body'
@@ -930,6 +973,7 @@ app.post('/api-proxy/*path', async (req, res) => {
       if (responseBody) res.setHeader('Content-Length', String(responseBody.byteLength))
       const errorBody = response.ok ? null : responseBody
       const errorSummary = errorBody ? sanitizeError(errorBody.toString('utf8')) : ''
+      const qualityMismatch = Boolean(responseQuality && quality && responseQuality !== quality)
       const deliveryStartedAt = Date.now()
       try {
         if (responseBody) {
@@ -961,9 +1005,9 @@ app.post('/api-proxy/*path', async (req, res) => {
       const status = response.ok ? 'success' : 'failed'
       db.prepare(`
         UPDATE generation_events
-        SET model = ?, upstream_channel = ?, route_path = ?, status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, output_quality = ?, status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(model, gptUpstream.channel, routePath, status, response.status, durationMs, errorSummary, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, responseQuality, status, response.status, durationMs, errorSummary, now(), requestId)
       addLog({
         requestId,
         level: response.ok ? 'info' : 'error',
@@ -972,7 +1016,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         ipHash,
         status,
         durationMs,
-        details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, routeAttempts: attempts.length, queueWaitMs: slot.waitedMs, ...(errorSummary ? { message: errorSummary } : {}) },
+        details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), imageCount, channel: gptUpstream.channel, upstreamStatus: response.status, fallbackStatus, routeAttempts: attempts.length, queueWaitMs: slot.waitedMs, ...(responseQuality ? { responseQuality, qualityMismatch } : {}), ...(errorSummary ? { message: errorSummary } : {}) },
       })
     } catch (error) {
       const durationMs = Date.now() - startedAt
@@ -1000,14 +1044,28 @@ app.use(express.json({ limit: '1mb' }))
 app.post('/api/generation-result', (req, res) => {
   const requestId = typeof req.body.requestId === 'string' ? req.body.requestId.trim() : ''
   const outputSize = typeof req.body.outputSize === 'string' ? req.body.outputSize.trim().replace('×', 'x') : ''
-  if (!/^[0-9a-f-]{36}$/i.test(requestId) || !/^\d{2,5}x\d{2,5}$/i.test(outputSize)) {
+  const rawOutputQuality = typeof req.body.outputQuality === 'string' ? req.body.outputQuality.trim() : ''
+  const outputQuality = rawOutputQuality ? normalizeImageQuality(rawOutputQuality, '') : ''
+  const hasOutputSize = /^[1-9]\d{0,4}x[1-9]\d{0,4}$/i.test(outputSize)
+  if (!/^[0-9a-f-]{36}$/i.test(requestId) || (!hasOutputSize && !outputQuality) || (rawOutputQuality && !outputQuality)) {
     return res.status(400).json({ error: '生成结果参数无效' })
   }
+  const updates = []
+  const values = []
+  if (hasOutputSize) {
+    updates.push('output_size = ?', 'output_resolution_tier = ?')
+    values.push(outputSize, getResolutionTier(outputSize))
+  }
+  if (outputQuality) {
+    updates.push('output_quality = ?')
+    values.push(outputQuality)
+  }
+  values.push(requestId, getIpHash(req))
   const result = db.prepare(`
     UPDATE generation_events
-    SET output_size = ?, output_resolution_tier = ?
+    SET ${updates.join(', ')}
     WHERE request_id = ? AND ip_hash = ? AND status = 'success'
-  `).run(outputSize, getResolutionTier(outputSize), requestId, getIpHash(req))
+  `).run(...values)
   if (!result.changes) return res.status(404).json({ error: '未找到对应的成功记录' })
   res.json({ updated: true })
 })
@@ -1577,8 +1635,8 @@ app.get('/api/admin/generations', (req, res) => {
     params.push(normalizeIp(ipAddress))
   }
   if (query) {
-    conditions.push('(prompt LIKE ? OR ip_address LIKE ? OR model LIKE ? OR request_id LIKE ? OR upstream_channel LIKE ? OR route_path LIKE ? OR output_size LIKE ?)')
-    params.push(...Array(7).fill(`%${query}%`))
+    conditions.push('(prompt LIKE ? OR ip_address LIKE ? OR model LIKE ? OR request_id LIKE ? OR upstream_channel LIKE ? OR route_path LIKE ? OR output_size LIKE ? OR output_quality LIKE ?)')
+    params.push(...Array(8).fill(`%${query}%`))
   }
   if (dateFrom) {
     const date = new Date(dateFrom)
@@ -1610,6 +1668,7 @@ app.get('/api/admin/generations', (req, res) => {
       resolutionTier: row.resolution_tier,
       outputSize: row.output_size,
       outputResolutionTier: row.output_resolution_tier,
+      outputQuality: row.output_quality,
       quality: row.quality,
       imageCount: row.image_count,
       status: row.status,

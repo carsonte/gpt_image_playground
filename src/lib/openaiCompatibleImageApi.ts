@@ -251,18 +251,22 @@ async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, s
   const images: string[] = []
   const rawImageUrls = data.map((item) => item.url).filter(isHttpUrl)
   const revisedPrompts: Array<string | undefined> = []
+  const responseParams = pickActualParams(payload)
+  const actualParamsList: Array<Partial<TaskParams> | undefined> = []
   try {
     for (const item of data) {
       const b64 = item.b64_json
       if (b64) {
         images.push(normalizeBase64Image(b64, mime))
         revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
+        actualParamsList.push(mergeActualParams(responseParams, pickActualParams(item)))
         continue
       }
 
       if (isHttpUrl(item.url) || isDataUrl(item.url)) {
         images.push(await fetchImageUrlAsDataUrl(item.url, mime, signal))
         revisedPrompts.push(typeof item.revised_prompt === 'string' ? item.revised_prompt : undefined)
+        actualParamsList.push(mergeActualParams(responseParams, pickActualParams(item)))
       }
     }
   } catch (err) {
@@ -278,13 +282,11 @@ async function parseImagesApiResponse(payload: ImageApiResponse, mime: string, s
     throw err
   }
 
-  const actualParams = mergeActualParams(
-    pickActualParams(payload),
-  )
+  const actualParams = mergeActualParams(responseParams, actualParamsList[0])
   return {
     images,
     actualParams,
-    actualParamsList: images.map(() => actualParams),
+    actualParamsList,
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
   }

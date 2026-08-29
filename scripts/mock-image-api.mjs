@@ -28,6 +28,7 @@ const pathModes = new Set([
   'url-ok',
   'url-redirect-cors-block',
   'wrong-shape',
+  'quality-low',
 ])
 
 const alternatingModeCounters = new Map()
@@ -151,6 +152,20 @@ function createRandomShape(req, cors, index = 0) {
 function createOpenAIResponse(req, mode, n = 1) {
   const created = Math.floor(Date.now() / 1000)
 
+  if (mode === 'quality-low') {
+    return {
+      created,
+      quality: 'low',
+      data: Array.from({ length: n }, (_, i) => ({
+        b64_json: tinyPngBase64,
+        quality: 'low',
+        size: '1024x1024',
+        output_format: 'png',
+        revised_prompt: `mock quality-low image ${i + 1}`,
+      })),
+    }
+  }
+
   if (mode === 'b64') {
     return {
       created,
@@ -258,7 +273,7 @@ function createResponsesPayload(mode) {
       revised_prompt: `mock ${mode} response image`,
       result: tinyPngBase64,
       output_format: 'png',
-      quality: 'auto',
+      quality: mode === 'quality-low' ? 'low' : 'auto',
       size: '1024x1024',
     }],
   }

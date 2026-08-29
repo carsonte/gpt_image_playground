@@ -20,6 +20,13 @@
 - `scripts/server-smoke.mjs` 新增响应体中途断开场景，验证 CatAPI → Sixoner 回退、阶段日志和最终成功记录。
 - 浏览器错误详情会显示代理返回的 `X-Request-Id`，便于与后台日志和生成记录关联。
 
+## 质量参数诊断
+
+- “请求质量”是浏览器提交给代理的参数；“实际上游质量”来自上游完整 JSON 响应（优先读取每张 `data[]` 图片项，缺失时读取顶层字段）。两者不同并不表示本站把 `high` 改成了 `low`，而是上游返回了不同的实际生效值。
+- 代理会在日志中记录 `requestedQuality`、`responseQuality` 和 `qualityMismatch`，生成记录分别保存请求质量与 `outputQuality`。管理员可按请求 ID 对照线路、模型和阶段耗时。
+- 质量字段只保存 `auto`、`low`、`medium`、`high` 这四种元数据；不会保存图片内容、Authorization、API Key 或完整请求体。
+- 旧版本日志只记录请求质量，无法回溯上游是否实际返回 `low`。截至本次部署前的生产记录，`quality=high` 有 24 条、`quality=auto` 有 11 条、`quality=low` 为 0 条；其中一条旧记录是线路回退后模型/分辨率降级，不是请求质量被改写。
+
 ## 生产故障证据
 
 | 请求 ID | 请求开始 | Sixoner 结果 | 最终结果 | 总耗时 |
