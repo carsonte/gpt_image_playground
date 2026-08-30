@@ -163,7 +163,7 @@ export default function GptRoutingControls({ settings, onChange, onReset, resetP
 
       <div className="mt-4 rounded-xl bg-blue-50 px-4 py-3 text-xs leading-5 text-blue-800 dark:bg-blue-500/[0.08] dark:text-blue-200">
         <span className="font-semibold">推荐默认：</span>
-        四组均为 {ROUTE_GROUPS.length > 0 ? settings.recommendedGptRoutes.generate['2K'].map((channel) => CHANNEL_META[channel].name).join(' → ') : ''}；流式开启，自动不匹配回退关闭。恢复推荐设置不会修改并发、IP 限制或首页设置。
+        四组均为 {ROUTE_GROUPS.length > 0 ? settings.recommendedGptRoutes.generate['2K'].map((channel) => CHANNEL_META[channel].name).join(' → ') : ''}；流式{settings.recommendedStreamEnabled ? '开启' : '关闭'}，自动不匹配回退关闭。恢复推荐设置不会修改并发、IP 限制或首页设置。
       </div>
     </fieldset>
   )

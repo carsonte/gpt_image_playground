@@ -395,6 +395,9 @@ describe('mask draft lifecycle in store actions', () => {
       actualParams: { output_format: 'png' },
       actualParamsList: [{ output_format: 'png' }],
       revisedPrompts: [],
+      requestId: '00000000-0000-4000-8000-000000000001',
+      upstreamChannel: 'catapi',
+      upstreamModel: 'gpt-image-2-4k',
     })
     useStore.setState({
       prompt: 'prompt',
@@ -407,11 +410,62 @@ describe('mask draft lifecycle in store actions', () => {
     const [task] = useStore.getState().tasks
     expect(task.actualParams).toMatchObject({ size: '1254x1254', output_format: 'png', n: 1 })
     expect(task.actualParamsByImage?.[task.outputImages[0]]).toMatchObject({ size: '1254x1254', output_format: 'png' })
+    expect(task).toMatchObject({
+      managedRequestId: '00000000-0000-4000-8000-000000000001',
+      upstreamChannel: 'catapi',
+      upstreamModel: 'gpt-image-2-4k',
+    })
+    expect(task.requestMetadataByImage?.[task.outputImages[0]]).toEqual({
+      requestId: '00000000-0000-4000-8000-000000000001',
+      upstreamChannel: 'catapi',
+      upstreamModel: 'gpt-image-2-4k',
+    })
     await clearTasks()
     await clearImages()
   })
 
-  it('keeps API-returned actual size over decoded image size', async () => {
+  it('stores request metadata for each generated image', async () => {
+    const { callImageApi } = await import('./lib/api')
+    vi.mocked(callImageApi).mockClear()
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: [
+        'data:image/png;base64,first-1254x1254',
+        'data:image/png;base64,second-2048x1024',
+      ],
+      actualParams: { output_format: 'png', n: 2 },
+      actualParamsList: [{ output_format: 'png' }, { output_format: 'png' }],
+      revisedPrompts: [],
+      requestId: 'request-first',
+      upstreamChannel: 'primary',
+      upstreamModel: 'gpt-image-2',
+      requestMetadataList: [
+        { requestId: 'request-first', upstreamChannel: 'primary', upstreamModel: 'gpt-image-2' },
+        { requestId: 'request-second', upstreamChannel: 'catapi', upstreamModel: 'gpt-image-2-4k' },
+      ],
+    })
+    useStore.setState({
+      prompt: 'prompt',
+      params: { ...DEFAULT_PARAMS, n: 2 },
+    })
+
+    await submitTask()
+    await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
+
+    const [task] = useStore.getState().tasks
+    expect(task.requestMetadataByImage).toEqual({
+      [task.outputImages[0]]: { requestId: 'request-first', upstreamChannel: 'primary', upstreamModel: 'gpt-image-2' },
+      [task.outputImages[1]]: { requestId: 'request-second', upstreamChannel: 'catapi', upstreamModel: 'gpt-image-2-4k' },
+    })
+    expect(task).toMatchObject({
+      managedRequestId: 'request-first',
+      upstreamChannel: 'primary',
+      upstreamModel: 'gpt-image-2',
+    })
+    await clearTasks()
+    await clearImages()
+  })
+
+  it('keeps decoded image size over API-returned size metadata', async () => {
     const { callImageApi } = await import('./lib/api')
     vi.mocked(callImageApi).mockClear()
     vi.mocked(callImageApi).mockResolvedValueOnce({
@@ -429,8 +483,8 @@ describe('mask draft lifecycle in store actions', () => {
     await vi.waitFor(() => expect(useStore.getState().tasks[0]?.status).toBe('done'))
 
     const [task] = useStore.getState().tasks
-    expect(task.actualParams?.size).toBe('1024x1024')
-    expect(task.actualParamsByImage?.[task.outputImages[0]].size).toBe('1024x1024')
+    expect(task.actualParams?.size).toBe('1254x1254')
+    expect(task.actualParamsByImage?.[task.outputImages[0]].size).toBe('1254x1254')
     await clearTasks()
     await clearImages()
   })
@@ -4157,6 +4211,57 @@ describe('agent built-in image tool failure', () => {
     await vi.waitFor(() => expect(callAgentResponsesApi).toHaveBeenCalledTimes(1))
 
     expect(vi.mocked(callAgentResponsesApi).mock.calls[0][0].params.size).toBe('1024x1024')
+  })
+
+  it('stores managed request metadata for a Hybrid Agent image', async () => {
+    const imageProfile = createDefaultOpenAIProfile({ id: 'image-profile', apiKey: 'image-key', apiMode: 'images' })
+    useStore.setState({
+      settings: normalizeSettings({
+        ...useStore.getState().settings,
+        profiles: [responsesProfile, imageProfile],
+        activeProfileId: responsesProfile.id,
+        agentApiConfigMode: 'hybrid',
+        agentTextProfileId: responsesProfile.id,
+        agentImageProfileId: imageProfile.id,
+        agentMaxToolRounds: 1,
+      }),
+    })
+    vi.mocked(callAgentResponsesApi).mockResolvedValueOnce({
+      text: '',
+      images: [],
+      outputItems: [{
+        type: 'function_call',
+        name: 'generate_image',
+        call_id: 'hybrid-metadata-call',
+        arguments: JSON.stringify({ id: 'image', prompt: 'metadata prompt' }),
+      }],
+      responseId: 'response-metadata',
+    })
+    vi.mocked(callImageApi).mockResolvedValueOnce({
+      images: ['data:image/png;base64,agent-2048x2048'],
+      actualParams: { output_format: 'png' },
+      actualParamsList: [{ output_format: 'png' }],
+      revisedPrompts: ['metadata prompt'],
+      requestId: 'agent-request',
+      upstreamChannel: 'sixoner',
+      upstreamModel: 'gpt-image-2-4k',
+      requestMetadataList: [{ requestId: 'agent-request', upstreamChannel: 'sixoner', upstreamModel: 'gpt-image-2-4k' }],
+    })
+
+    await submitAgentMessage()
+    await vi.waitFor(() => expect(useStore.getState().tasks.find((task) => task.agentToolCallId === 'hybrid-metadata-call')?.status).toBe('done'))
+
+    const task = useStore.getState().tasks.find((item) => item.agentToolCallId === 'hybrid-metadata-call')!
+    expect(task).toMatchObject({
+      managedRequestId: 'agent-request',
+      upstreamChannel: 'sixoner',
+      upstreamModel: 'gpt-image-2-4k',
+    })
+    expect(task.requestMetadataByImage?.[task.outputImages[0]]).toEqual({
+      requestId: 'agent-request',
+      upstreamChannel: 'sixoner',
+      upstreamModel: 'gpt-image-2-4k',
+    })
   })
 
   it('does not apply Codex text-profile limits to a non-Codex image profile', async () => {

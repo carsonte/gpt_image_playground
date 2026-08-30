@@ -7,6 +7,7 @@ import { isIP } from 'node:net'
 import express from 'express'
 import { config } from './config.mjs'
 import { db } from './database.mjs'
+import { readEmbeddedPngSizes } from './imageDimensions.mjs'
 import {
   createSessionToken,
   hashIp,
@@ -46,7 +47,9 @@ let activeSenseNovaRequests = 0
 const defaultPrivacyNotice = '图片仅保存在当前浏览器，服务器不保存图片'
 const gptChannels = new Set(GPT_CHANNELS)
 const gptFallbackStatuses = new Set([401, 402, 403, 404, 405, 408, 409, 429])
-const MAX_BUFFERED_JSON_RESPONSE_BYTES = 32 * 1024 * 1024
+const GPT_PROXY_DEADLINE_MS = 600_000
+const MAX_BUFFERED_JSON_RESPONSE_BYTES = 64 * 1024 * 1024
+const MAX_LARGE_IMAGE_REQUEST_BYTES = 60 * 1024 * 1024
 const imageQualityValues = new Set(['auto', 'low', 'medium', 'high'])
 const senseNovaSizes = new Set([
   '2752x1536', '1536x2752', '2048x2048', '2496x1664', '1664x2496', '2368x1760',
@@ -166,47 +169,29 @@ function normalizeImageQuality(value, fallback = 'high') {
   return imageQualityValues.has(normalized) ? normalized : fallback
 }
 
-function readResponseQuality(body) {
+function parseResponseMetadata(body) {
   let payload
   try {
     payload = JSON.parse(body.toString('utf8'))
-  } catch {
-    return ''
+  } catch (error) {
+    throw new UpstreamPhaseError(`上游 JSON 响应不完整：${sanitizeError(error.message)}`, 'response_body', error)
   }
 
-  const values = []
-  const add = (value) => {
+  const qualities = []
+  const addQuality = (value) => {
     const normalized = String(value ?? '').trim().toLowerCase()
-    if (imageQualityValues.has(normalized) && !values.includes(normalized)) values.push(normalized)
+    if (imageQualityValues.has(normalized) && !qualities.includes(normalized)) qualities.push(normalized)
   }
-  if (payload && typeof payload === 'object') {
-    add(payload.quality)
-    if (Array.isArray(payload.data)) {
-      for (const item of payload.data) add(item?.quality)
-    }
-    if (Array.isArray(payload.output)) {
-      for (const item of payload.output) add(item?.quality)
-    }
-  }
-  return values.join(',')
-}
-
-function readResponseSize(body) {
-  let payload
-  try {
-    payload = JSON.parse(body.toString('utf8'))
-  } catch {
-    return ''
-  }
-  const values = []
-  const add = (value) => {
-    const normalized = String(value ?? '').trim().replace('×', 'x')
-    if (/^\d+\s*x\s*\d+$/i.test(normalized) && !values.includes(normalized)) values.push(normalized)
+  const sizes = []
+  const addSize = (value) => {
+    const normalized = String(value ?? '').trim().replace('×', 'x').replace(/\s+/g, '')
+    if (/^\d+x\d+$/i.test(normalized) && !sizes.includes(normalized)) sizes.push(normalized)
   }
   const addDimensions = (value) => {
     if (!value || typeof value !== 'object' || Array.isArray(value)) return
-    add(value.size ?? value.resolution)
-    if (value.width != null && value.height != null) add(`${value.width}x${value.height}`)
+    addQuality(value.quality)
+    addSize(value.size ?? value.resolution)
+    if (value.width != null && value.height != null) addSize(`${value.width}x${value.height}`)
   }
   if (payload && typeof payload === 'object') {
     addDimensions(payload)
@@ -216,19 +201,23 @@ function readResponseSize(body) {
       }
     }
   }
-  return values.join(',')
+  return {
+    quality: qualities.join(','),
+    reportedSize: sizes.join(','),
+    verifiedSize: readEmbeddedPngSizes(payload).join(','),
+  }
 }
 
-function getResponseMismatch(responseQuality, responseSize, requestedQuality, requestedSize) {
+function getResponseMismatch(responseQuality, verifiedSize, requestedQuality, requestedSize) {
   const quality = normalizeImageQuality(requestedQuality, '')
   const qualityMismatch = Boolean(
     responseQuality && quality && quality !== 'auto'
       && responseQuality.split(',').some((item) => item !== quality),
   )
-  const requestedTier = getResolutionTier(requestedSize)
+  const normalizedRequestedSize = String(requestedSize ?? '').trim().toLowerCase().replace('×', 'x').replace(/\s+/g, '')
   const sizeMismatch = Boolean(
-    responseSize && (requestedTier === '2K' || requestedTier === '4K')
-      && responseSize.split(',').some((item) => getResolutionTier(item) !== requestedTier),
+    verifiedSize && /^\d+x\d+$/.test(normalizedRequestedSize)
+      && verifiedSize.split(',').some((item) => item.toLowerCase() !== normalizedRequestedSize),
   )
   return { qualityMismatch, sizeMismatch, mismatch: qualityMismatch || sizeMismatch }
 }
@@ -416,12 +405,15 @@ function runProxyQueue() {
     const idx = proxyQueue.findIndex((item) => (activeByIp.get(item.metadata.ipAddress) ?? 0) < perIpConcurrency)
     if (idx < 0) return
     const [item] = proxyQueue.splice(idx, 1)
-    if (item.req.aborted) {
+    if (item.req.aborted || item.signal?.aborted) {
+      item.req.off('aborted', item.onAborted)
+      item.signal?.removeEventListener('abort', item.onAborted)
       item.resolve(null)
       continue
     }
     activeProxyRequests += 1
     item.req.off('aborted', item.onAborted)
+    item.signal?.removeEventListener('abort', item.onAborted)
     const startedAt = Date.now()
     activeProxyItems.set(item.metadata.requestId, { ...item.metadata, queuedAt: item.queuedAt, startedAt })
     let released = false
@@ -438,10 +430,11 @@ function runProxyQueue() {
   }
 }
 
-function acquireProxySlot(req, metadata) {
+function acquireProxySlot(req, metadata, signal) {
   return new Promise((resolveSlot) => {
     const item = {
       req,
+      signal,
       queuedAt: Date.now(),
       metadata,
       resolve: resolveSlot,
@@ -451,10 +444,14 @@ function acquireProxySlot(req, metadata) {
       const idx = proxyQueue.indexOf(item)
       if (idx < 0) return
       proxyQueue.splice(idx, 1)
+      req.off('aborted', item.onAborted)
+      signal?.removeEventListener('abort', item.onAborted)
       resolveSlot(null)
     }
     req.once('aborted', item.onAborted)
+    signal?.addEventListener('abort', item.onAborted, { once: true })
     proxyQueue.push(item)
+    if (signal?.aborted) return item.onAborted()
     runProxyQueue()
   })
 }
@@ -807,14 +804,6 @@ async function readUpstreamBody(response, limit = MAX_BUFFERED_JSON_RESPONSE_BYT
   return Buffer.concat(chunks, total)
 }
 
-function validateJsonResponseBody(body) {
-  try {
-    JSON.parse(body.toString('utf8'))
-  } catch (error) {
-    throw new UpstreamPhaseError(`上游 JSON 响应不完整：${sanitizeError(error.message)}`, 'response_body', error)
-  }
-}
-
 app.post('/api-proxy/*path', async (req, res, next) => {
   if (req.headers['x-image-module'] !== 'sensenova-u1') return next()
 
@@ -990,8 +979,33 @@ app.post('/api-proxy/*path', async (req, res) => {
   if (willQueue) {
     addLog({ requestId, type: 'request', event: 'image.queued', ipHash, status: 'queued', details: { endpoint, position: proxyQueue.length + 1 } })
   }
-  const slot = await acquireProxySlot(req, { requestId, ipAddress, endpoint, action, prompt, size, imageCount })
-  if (!slot) return
+  const requestController = new AbortController()
+  const deadline = setTimeout(() => {
+    requestController.abort(new UpstreamPhaseError('生图请求已超过 600 秒总时限', 'deadline'))
+  }, Math.max(1, GPT_PROXY_DEADLINE_MS - (Date.now() - startedAt)))
+  deadline.unref?.()
+  const onClientDisconnect = () => {
+    if (!res.writableEnded && !requestController.signal.aborted) {
+      requestController.abort(new UpstreamPhaseError('客户端已断开生图请求', 'client_abort'))
+    }
+  }
+  const cleanupRequest = () => {
+    clearTimeout(deadline)
+    req.off('aborted', onClientDisconnect)
+    res.off('close', onClientDisconnect)
+  }
+  req.once('aborted', onClientDisconnect)
+  res.once('close', onClientDisconnect)
+  const slot = await acquireProxySlot(req, { requestId, ipAddress, endpoint, action, prompt, size, imageCount }, requestController.signal)
+  if (!slot) {
+    cleanupRequest()
+    if (!res.destroyed && !res.writableEnded && requestController.signal.reason?.phase === 'deadline') {
+      addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs: Date.now() - startedAt, details: { endpoint, action, phase: 'deadline', message: sanitizeError(requestController.signal.reason.message) } })
+      res.setHeader('X-Request-Id', requestId)
+      return res.status(502).json({ error: '上游图片服务在请求总时限阶段失败，请稍后重试', requestId, phase: 'deadline' })
+    }
+    return
+  }
 
   try {
     // 在真正获得执行槽位后快照；等待中的请求会使用后台最新设置。
@@ -1017,7 +1031,7 @@ app.post('/api-proxy/*path', async (req, res) => {
     }
     try {
       if (String(req.headers['content-type'] ?? '').includes('application/json')) {
-        body = await readBody(req)
+        body = await readBody(req, endpoint === '/responses' ? MAX_LARGE_IMAGE_REQUEST_BYTES : undefined)
         requestBytes = body.byteLength
         payload = JSON.parse(body.toString('utf8'))
         if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('请求内容必须是 JSON 对象')
@@ -1044,7 +1058,7 @@ app.post('/api-proxy/*path', async (req, res) => {
         requestedStream = streamPolicy.requested
         effectiveStream = streamPolicy.enabled
       } else {
-        body = await readBody(req, 60 * 1024 * 1024)
+        body = await readBody(req, MAX_LARGE_IMAGE_REQUEST_BYTES)
         requestBytes = body.byteLength
         const multipartAudit = getMultipartAudit(body)
         inputImageCount = multipartAudit.inputImageCount
@@ -1095,13 +1109,38 @@ app.post('/api-proxy/*path', async (req, res) => {
     let responseBody = null
     let responseContentType = ''
     let responseQuality = ''
+    let responseReportedSize = ''
+    let responseVerifiedSize = ''
     let responseSize = ''
     let qualityMismatch = false
     let sizeMismatch = false
     let fallbackStatus = null
     let finalAttempt = null
     const attempts = []
+    const attemptDetails = (attempt) => ({
+      ...auditDetails(),
+      channel: attempt.channel,
+      model: attempt.model,
+      attempt: attempt.attempt,
+      phase: attempt.phase,
+      ...(attempt.headersMs == null ? {} : { headersMs: attempt.headersMs }),
+      ...(attempt.bodyMs == null ? {} : { bodyMs: attempt.bodyMs }),
+      ...(attempt.deliveryMs == null ? {} : { deliveryMs: attempt.deliveryMs }),
+      ...(attempt.responseBytes == null ? {} : { responseBytes: attempt.responseBytes }),
+      ...(attempt.responseQuality == null ? {} : { responseQuality: attempt.responseQuality }),
+      ...(attempt.responseSize == null ? {} : { responseSize: attempt.responseSize }),
+      ...(attempt.responseReportedSize == null ? {} : { responseReportedSize: attempt.responseReportedSize }),
+      ...(attempt.responseVerifiedSize == null ? {} : { responseVerifiedSize: attempt.responseVerifiedSize }),
+      ...(attempt.qualityMismatch == null ? {} : { qualityMismatch: attempt.qualityMismatch }),
+      ...(attempt.sizeMismatch == null ? {} : { sizeMismatch: attempt.sizeMismatch }),
+      ...(attempt.upstreamStatus == null ? {} : { upstreamStatus: attempt.upstreamStatus }),
+    })
     try {
+      const throwIfRequestAborted = () => {
+        if (!requestController.signal.aborted) return
+        const reason = requestController.signal.reason
+        throw reason instanceof Error ? reason : new UpstreamPhaseError('生图请求已取消', 'request_abort')
+      }
       const sendUpstream = (upstream) => {
         const upstreamModel = getUpstreamModel(upstream, size)
         const upstreamBody = payload
@@ -1120,26 +1159,10 @@ app.post('/api-proxy/*path', async (req, res) => {
           headers,
           body: upstreamBody,
           duplex: 'half',
-          signal: AbortSignal.timeout(600_000),
+          signal: requestController.signal,
         })
       }
       let upstreamIndex = 0
-      const attemptDetails = (attempt) => ({
-        ...auditDetails(),
-        channel: attempt.channel,
-        model: attempt.model,
-        attempt: attempt.attempt,
-        phase: attempt.phase,
-        ...(attempt.headersMs == null ? {} : { headersMs: attempt.headersMs }),
-        ...(attempt.bodyMs == null ? {} : { bodyMs: attempt.bodyMs }),
-        ...(attempt.deliveryMs == null ? {} : { deliveryMs: attempt.deliveryMs }),
-        ...(attempt.responseBytes == null ? {} : { responseBytes: attempt.responseBytes }),
-        ...(attempt.responseQuality == null ? {} : { responseQuality: attempt.responseQuality }),
-        ...(attempt.responseSize == null ? {} : { responseSize: attempt.responseSize }),
-        ...(attempt.qualityMismatch == null ? {} : { qualityMismatch: attempt.qualityMismatch }),
-        ...(attempt.sizeMismatch == null ? {} : { sizeMismatch: attempt.sizeMismatch }),
-        ...(attempt.upstreamStatus == null ? {} : { upstreamStatus: attempt.upstreamStatus }),
-      })
       const moveToNextUpstream = (nextUpstream) => {
         upstreamIndex += 1
         gptUpstream = nextUpstream
@@ -1147,8 +1170,11 @@ app.post('/api-proxy/*path', async (req, res) => {
         routePath = upstreamChain.slice(0, upstreamIndex + 1).map((upstream) => upstream.channel).join(' → ')
       }
       while (true) {
+        throwIfRequestAborted()
         responseBody = null
         responseQuality = ''
+        responseReportedSize = ''
+        responseVerifiedSize = ''
         responseSize = ''
         qualityMismatch = false
         sizeMismatch = false
@@ -1163,6 +1189,8 @@ app.post('/api-proxy/*path', async (req, res) => {
           responseBytes: null,
           responseQuality: null,
           responseSize: null,
+          responseReportedSize: null,
+          responseVerifiedSize: null,
           qualityMismatch: null,
           sizeMismatch: null,
           upstreamStatus: null,
@@ -1174,9 +1202,16 @@ app.post('/api-proxy/*path', async (req, res) => {
           response = await sendUpstream(gptUpstream)
           attempt.headersMs = Date.now() - attemptStartedAt
           attempt.upstreamStatus = response.status
+          throwIfRequestAborted()
         } catch (error) {
           attempt.headersMs = Date.now() - attemptStartedAt
           attempt.phase = error.phase ?? 'connection'
+          throwIfRequestAborted()
+          const timeoutCode = String(error?.code ?? error?.cause?.code ?? '').toUpperCase()
+          if (error?.name === 'AbortError' || error?.name === 'TimeoutError' || timeoutCode === 'ABORT_ERR' || timeoutCode.includes('TIMEOUT')) {
+            attempt.phase = 'response_headers'
+            throw new UpstreamPhaseError(`上游网络请求超时或被取消：${sanitizeError(error.message)}`, 'response_headers', error)
+          }
           const message = sanitizeError(error.message)
           const nextUpstream = upstreamChain[upstreamIndex + 1]
           if (!nextUpstream) throw error
@@ -1190,6 +1225,7 @@ app.post('/api-proxy/*path', async (req, res) => {
           fallbackStatus = response.status
           attempt.phase = 'response_status'
           await response.body?.cancel().catch(() => {})
+          throwIfRequestAborted()
           addLog({ requestId, level: 'warn', type: 'request', event: 'image.proxy_fallback', ipHash, status: 'fallback', details: { ...attemptDetails(attempt), from: gptUpstream.channel, to: nextUpstream.channel, fallbackReason: `http_${fallbackStatus}`, upstreamStatus: fallbackStatus } })
           moveToNextUpstream(nextUpstream)
           continue
@@ -1206,14 +1242,18 @@ app.post('/api-proxy/*path', async (req, res) => {
             attempt.bodyMs = Date.now() - bodyStartedAt
             attempt.responseBytes = responseBody.byteLength
             if (response.ok && isJsonContentType(responseContentType)) {
-              validateJsonResponseBody(responseBody)
-              responseQuality = readResponseQuality(responseBody)
-              responseSize = readResponseSize(responseBody)
-              const mismatch = getResponseMismatch(responseQuality, responseSize, quality, size)
+              const responseMetadata = parseResponseMetadata(responseBody)
+              responseQuality = responseMetadata.quality
+              responseReportedSize = responseMetadata.reportedSize
+              responseVerifiedSize = responseMetadata.verifiedSize
+              responseSize = responseVerifiedSize || responseReportedSize
+              const mismatch = getResponseMismatch(responseQuality, responseVerifiedSize, quality, size)
               qualityMismatch = mismatch.qualityMismatch
               sizeMismatch = mismatch.sizeMismatch
               attempt.responseQuality = responseQuality || null
               attempt.responseSize = responseSize || null
+              attempt.responseReportedSize = responseReportedSize || null
+              attempt.responseVerifiedSize = responseVerifiedSize || null
               attempt.qualityMismatch = qualityMismatch
               attempt.sizeMismatch = sizeMismatch
             }
@@ -1221,6 +1261,12 @@ app.post('/api-proxy/*path', async (req, res) => {
             attempt.bodyMs = Date.now() - bodyStartedAt
             attempt.phase = error.phase ?? 'response_body'
             if (Number.isFinite(error.responseBytes)) attempt.responseBytes = error.responseBytes
+            throwIfRequestAborted()
+            if (response.ok) {
+              await response.body?.cancel().catch(() => {})
+              throwIfRequestAborted()
+              throw error
+            }
             const message = sanitizeError(error.message)
             if (!nextUpstream) throw error
             await response.body?.cancel().catch(() => {})
@@ -1229,6 +1275,7 @@ app.post('/api-proxy/*path', async (req, res) => {
             continue
           }
         }
+        throwIfRequestAborted()
         if (routingSnapshot.autoFallbackOnMismatch && response.ok && isJsonContentType(responseContentType) && (qualityMismatch || sizeMismatch) && nextUpstream) {
           attempt.phase = 'response_mismatch'
           const fallbackReason = [qualityMismatch ? 'quality_mismatch' : '', sizeMismatch ? 'size_mismatch' : ''].filter(Boolean).join(',')
@@ -1274,7 +1321,10 @@ app.post('/api-proxy/*path', async (req, res) => {
           await delivered
         }
       } catch (error) {
-        const phaseError = error instanceof UpstreamPhaseError
+        const abortReason = requestController.signal.aborted ? requestController.signal.reason : null
+        const phaseError = abortReason instanceof Error
+          ? abortReason
+          : error instanceof UpstreamPhaseError
           ? error
           : new UpstreamPhaseError(`向浏览器返回响应时连接中断：${sanitizeError(error.message)}`, 'response_delivery', error)
         if (finalAttempt) {
@@ -1289,11 +1339,14 @@ app.post('/api-proxy/*path', async (req, res) => {
       }
       const durationMs = Date.now() - startedAt
       const status = response.ok ? 'success' : 'failed'
+      const outputSize = responseVerifiedSize.split(',')[0] ?? ''
       db.prepare(`
         UPDATE generation_events
-        SET model = ?, upstream_channel = ?, route_path = ?, output_quality = ?, status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
+        SET model = ?, upstream_channel = ?, route_path = ?, output_size = CASE WHEN ? <> '' THEN ? ELSE output_size END,
+            output_resolution_tier = CASE WHEN ? <> '' THEN ? ELSE output_resolution_tier END,
+            output_quality = ?, status = ?, upstream_status = ?, duration_ms = ?, error_summary = ?, completed_at = ?
         WHERE request_id = ?
-      `).run(model, gptUpstream.channel, routePath, responseQuality, status, response.status, durationMs, errorSummary, now(), requestId)
+      `).run(model, gptUpstream.channel, routePath, outputSize, outputSize, outputSize, outputSize ? getResolutionTier(outputSize) : 'other', responseQuality, status, response.status, durationMs, errorSummary, now(), requestId)
       addLog({
         requestId,
         level: response.ok ? 'info' : 'error',
@@ -1314,13 +1367,15 @@ app.post('/api-proxy/*path', async (req, res) => {
         WHERE request_id = ?
       `).run(model, gptUpstream.channel, routePath, finalAttempt?.upstreamStatus ?? null, durationMs, message, now(), requestId)
       addLog({ requestId, level: 'error', type: 'system', event: 'image.proxy_error', ipHash, status: 'failed', durationMs, details: { ...auditDetails(), ...(finalAttempt ? attemptDetails(finalAttempt) : {}), endpoint, model, imageCount, channel: gptUpstream.channel, routeAttempts: attempts.length, phase, message } })
-      if (!res.headersSent) {
-        const phaseLabel = phase === 'connection' ? '连接上游' : phase === 'response_headers' ? '等待上游响应头' : phase === 'response_body' ? '读取上游响应体' : phase === 'response_delivery' ? '返回浏览器' : '连接或等待上游响应'
+      if (!res.headersSent && !res.destroyed && !res.writableEnded) {
+        const phaseLabel = phase === 'connection' ? '连接上游' : phase === 'response_headers' ? '等待上游响应头' : phase === 'response_body' ? '读取上游响应体' : phase === 'response_delivery' ? '返回浏览器' : phase === 'deadline' ? '请求总时限' : phase === 'client_abort' ? '客户端取消' : '连接或等待上游响应'
+        res.setHeader('X-Request-Id', requestId)
         res.status(502).json({ error: `上游图片服务在${phaseLabel}阶段失败，请稍后重试`, requestId, phase })
       }
       else if (!res.destroyed && !res.writableEnded) res.end()
     }
   } finally {
+    cleanupRequest()
     slot.release()
   }
 })

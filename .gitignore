@@ -8,4 +8,5 @@ dev-proxy.config.json
 *.tgz
 data/
 deploy/.env.server
+ssh/
 .audit/

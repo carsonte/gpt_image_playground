@@ -8,12 +8,24 @@ const dataDir = await mkdtemp(join(tmpdir(), 'gpt-image-server-test-'))
 const port = 18788
 const upstreamPort = 18789
 const origin = `http://127.0.0.1:${port}`
+
+function createPngBase64(width, height) {
+  const header = Buffer.alloc(24)
+  Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(header)
+  header.writeUInt32BE(13, 8)
+  header.write('IHDR', 12, 'ascii')
+  header.writeUInt32BE(width, 16)
+  header.writeUInt32BE(height, 20)
+  return header.toString('base64')
+}
+
 let upstreamActive = 0
 let maxUpstreamActive = 0
 let upstreamPrompts = []
 let upstreamPayloads = []
 let upstreamPaths = []
 let upstreamBodies = []
+const cancelledUpstreamPrompts = []
 const upstream = createServer(async (req, res) => {
   upstreamPaths.push(req.url)
   const chunks = []
@@ -50,6 +62,36 @@ const upstream = createServer(async (req, res) => {
     }, 50)
     return
   }
+  if (req.url === '/catapi/v1/images/generations' && payload?.prompt === 'JSON 截断不回退测试') {
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end('{"data":[')
+    upstreamActive -= 1
+    return
+  }
+  if (req.url === '/catapi/v1/images/generations' && payload?.prompt === '响应体超限不回退测试') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Content-Length': String(64 * 1024 * 1024 + 1) })
+    res.end()
+    upstreamActive -= 1
+    return
+  }
+  if (req.url === '/catapi/v1/images/generations' && payload?.prompt === '客户端取消不回退测试') {
+    let settled = false
+    const timer = setTimeout(() => {
+      if (settled) return
+      settled = true
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end('{"data":[]}')
+      upstreamActive -= 1
+    }, 1000)
+    res.once('close', () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      cancelledUpstreamPrompts.push(payload.prompt)
+      upstreamActive -= 1
+    })
+    return
+  }
   if (payload?.prompt === 'SSE 不回退测试') {
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' })
     res.write('data: {"type":"response.output_text.delta","delta":"stream"}\n\n')
@@ -70,7 +112,15 @@ const upstream = createServer(async (req, res) => {
     const size = req.url === '/catapi/v1/images/generations' ? '2048x2048' : '2880x2880'
     await new Promise((resolve) => setTimeout(resolve, 40))
     res.writeHead(200, { 'Content-Type': 'application/json' })
-    res.end(JSON.stringify({ data: [{ size, b64_json: Buffer.from(size).toString('base64') }] }))
+    const [width, height] = size.split('x').map(Number)
+    res.end(JSON.stringify({ data: [{ size: '2880x2880', b64_json: createPngBase64(width, height) }] }))
+    upstreamActive -= 1
+    return
+  }
+  if (payload?.prompt === '尺寸元数据冲突不回退测试') {
+    await new Promise((resolve) => setTimeout(resolve, 40))
+    res.writeHead(200, { 'Content-Type': 'application/json' })
+    res.end(JSON.stringify({ quality: 'high', size: '1536x1024', data: [{ quality: 'high', size: '1536x1024', b64_json: createPngBase64(2880, 2880) }] }))
     upstreamActive -= 1
     return
   }
@@ -196,7 +246,7 @@ try {
     generate: { '2K': ['sixoner', 'catapi', 'primary'], '4K': ['sixoner', 'catapi', 'primary'] },
     edit: { '2K': ['sixoner', 'catapi', 'primary'], '4K': ['sixoner', 'catapi', 'primary'] },
   }
-  if (JSON.stringify(initialQueueSettings.payload.gptRoutes) !== JSON.stringify(recommendedRoutes) || JSON.stringify(initialQueueSettings.payload.recommendedGptRoutes) !== JSON.stringify(recommendedRoutes) || initialQueueSettings.payload.streamEnabled !== true || initialQueueSettings.payload.streamMode !== 'client' || initialQueueSettings.payload.autoFallbackOnMismatch !== false || JSON.stringify(initialQueueSettings.payload.configured) !== JSON.stringify({ primary: true, sixoner: true, catapi: true })) throw new Error('GPT 四组推荐路由或流式默认配置不正确')
+  if (JSON.stringify(initialQueueSettings.payload.gptRoutes) !== JSON.stringify(recommendedRoutes) || JSON.stringify(initialQueueSettings.payload.recommendedGptRoutes) !== JSON.stringify(recommendedRoutes) || initialQueueSettings.payload.streamEnabled !== false || initialQueueSettings.payload.streamMode !== 'off' || initialQueueSettings.payload.autoFallbackOnMismatch !== false || JSON.stringify(initialQueueSettings.payload.configured) !== JSON.stringify({ primary: true, sixoner: true, catapi: true })) throw new Error('GPT 四组推荐路由或流式默认配置不正确')
   const customRoutes = {
     generate: { '2K': ['catapi', 'sixoner', 'primary'], '4K': ['catapi', 'sixoner', 'primary'] },
     edit: { '2K': ['catapi', 'sixoner', 'primary'], '4K': ['catapi', 'sixoner', 'primary'] },
@@ -376,18 +426,54 @@ try {
   const recordAfterDelivery = await request('/api/admin/generations?q=响应传输完成测试', { headers: { Cookie: cookie } })
   if (recordAfterDelivery.payload.items[0]?.status !== 'success' || recordAfterDelivery.payload.items[0]?.durationMs < 300) throw new Error('图片响应传输完成后生成记录未正确完成')
 
-  const truncatedResponse = await request('/api-proxy/images/generations', {
+  for (const prompt of ['响应体中途断开测试', 'JSON 截断不回退测试', '响应体超限不回退测试']) {
+    const ambiguousResponse = await rawRequest('/api-proxy/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, size: '2048x2048', n: 1 }),
+    })
+    const requestId = ambiguousResponse.payload?.requestId
+    if (ambiguousResponse.response.status !== 502 || ambiguousResponse.payload?.phase !== 'response_body' || ambiguousResponse.response.headers.get('x-request-id') !== requestId) {
+      const unhandledLogs = ambiguousResponse.response.status === 500
+        ? await request('/api/admin/logs?eventPrefix=server.unhandled', { headers: { Cookie: cookie } })
+        : null
+      throw new Error(`${prompt} 未返回明确的响应体阶段 502：HTTP ${ambiguousResponse.response.status} ${JSON.stringify(ambiguousResponse.payload)} ${JSON.stringify(unhandledLogs?.payload?.logs?.[0]?.details)}`)
+    }
+    if (upstreamPayloads.filter((item) => item.prompt === prompt).length !== 1) throw new Error(`${prompt} 不应自动请求备用线路`)
+    const ambiguousLogs = await request(`/api/admin/logs?requestId=${requestId}`, { headers: { Cookie: cookie } })
+    if (ambiguousLogs.payload.logs.some((item) => item.event === 'image.proxy_fallback')) throw new Error(`${prompt} 不应记录回退日志`)
+    const ambiguousError = ambiguousLogs.payload.logs.find((item) => item.event === 'image.proxy_error')
+    if (ambiguousError?.details?.phase !== 'response_body' || ambiguousError.details.routeAttempts !== 1 || !Number.isFinite(ambiguousError.details.bodyMs)) throw new Error(`${prompt} 缺少单线路响应体阶段诊断信息`)
+  }
+
+  const cancelController = new AbortController()
+  const cancelledRequest = fetch(`${origin}/api-proxy/images/generations`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ prompt: '响应体中途断开测试', size: '2048x2048', n: 1 }),
-  })
-  if (truncatedResponse.response.headers.get('x-image-upstream') !== 'sixoner') throw new Error('上游响应体中途断开后未切换备用线路')
-  const truncatedFallbackLogs = await request('/api/admin/logs?eventPrefix=image.proxy_fallback', { headers: { Cookie: cookie } })
-  const truncatedFallback = truncatedFallbackLogs.payload.logs.find((item) => item.requestId === truncatedResponse.response.headers.get('x-request-id'))
-  if (truncatedFallback?.details?.phase !== 'response_body' || !Number.isFinite(truncatedFallback?.details?.bodyMs)) throw new Error('响应体中途断开未记录响应体阶段诊断信息')
-  const truncatedProxyLogs = await request('/api/admin/logs?eventPrefix=image.proxy', { headers: { Cookie: cookie } })
-  const truncatedProxy = truncatedProxyLogs.payload.logs.find((item) => item.requestId === truncatedResponse.response.headers.get('x-request-id'))
-  if (!Number.isFinite(truncatedProxy?.details?.requestBytes) || truncatedProxy?.details?.routeAttempts !== 2) throw new Error('代理成功记录缺少请求体大小或线路尝试次数')
+    body: JSON.stringify({ prompt: '客户端取消不回退测试', size: '2048x2048', n: 1 }),
+    signal: cancelController.signal,
+  }).catch((error) => error)
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (upstreamPayloads.some((item) => item.prompt === '客户端取消不回退测试')) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  if (!upstreamPayloads.some((item) => item.prompt === '客户端取消不回退测试')) throw new Error('客户端取消测试未到达第一条上游线路')
+  cancelController.abort()
+  await cancelledRequest
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    if (cancelledUpstreamPrompts.includes('客户端取消不回退测试')) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  if (!cancelledUpstreamPrompts.includes('客户端取消不回退测试')) throw new Error('客户端取消后未中止当前上游请求')
+  if (upstreamPayloads.filter((item) => item.prompt === '客户端取消不回退测试').length !== 1) throw new Error('客户端取消后不应自动请求备用线路')
+  let clientAbortLog = null
+  for (let attempt = 0; attempt < 50; attempt += 1) {
+    const abortLogs = await request('/api/admin/logs?eventPrefix=image.proxy_error', { headers: { Cookie: cookie } })
+    clientAbortLog = abortLogs.payload.logs.find((item) => item.details?.phase === 'client_abort')
+    if (clientAbortLog) break
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  if (clientAbortLog?.details?.routeAttempts !== 1) throw new Error('客户端取消未记录单线路取消阶段')
 
   await request('/api/admin/settings/queue', {
     method: 'PUT',
@@ -674,6 +760,19 @@ try {
   })
   const nonStreamResponsesPayload = upstreamPayloads.findLast((item) => item.input === 'responses nonstream test')
   if (nonStreamResponsesPayload && ('stream' in nonStreamResponsesPayload || 'partial_images' in nonStreamResponsesPayload || nonStreamResponsesPayload.tools?.[0]?.partial_images !== undefined)) throw new Error('Responses 流式关闭时请求体仍包含 stream 参数')
+  await request('/api-proxy/responses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      metadata: { test: 'large-responses-image-input' },
+      input: [{ role: 'user', content: [
+        { type: 'input_text', text: 'Responses 大图输入测试' },
+        { type: 'input_image', image_url: `data:image/png;base64,${'A'.repeat(2 * 1024 * 1024 + 1024)}` },
+      ] }],
+      tools: [{ type: 'image_generation', size: '2880x2880' }],
+    }),
+  })
+  if (!upstreamPayloads.some((item) => item.metadata?.test === 'large-responses-image-input')) throw new Error('Responses 超过 2 MiB 的图片输入未成功转发')
 
   // 自动质量/尺寸回退只对完整 JSON 生效，SSE 不应重复请求。
   const mismatchRoutes = {
@@ -704,7 +803,15 @@ try {
   })
   if (sizeMismatchResult.response.headers.get('x-image-upstream') !== 'sixoner') throw new Error('开启自动尺寸回退后未切换到下一条线路')
   const sizeMismatchLogs = await request(`/api/admin/logs?requestId=${sizeMismatchResult.response.headers.get('x-request-id')}`, { headers: { Cookie: cookie } })
-  if (!sizeMismatchLogs.payload.logs.some((item) => item.event === 'image.proxy_fallback' && item.details?.fallbackReason === 'size_mismatch')) throw new Error('尺寸不匹配回退日志缺少原因')
+  if (!sizeMismatchLogs.payload.logs.some((item) => item.event === 'image.proxy_fallback' && item.details?.fallbackReason === 'size_mismatch' && item.details?.responseVerifiedSize === '2048x2048')) throw new Error('尺寸不匹配回退日志缺少真实像素原因')
+  const conflictingSizeResult = await request('/api-proxy/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ prompt: '尺寸元数据冲突不回退测试', size: '2880x2880', quality: 'high', n: 1 }),
+  })
+  if (conflictingSizeResult.response.headers.get('x-image-upstream') !== 'catapi' || upstreamPayloads.filter((item) => item.prompt === '尺寸元数据冲突不回退测试').length !== 1) throw new Error('真实 PNG 尺寸匹配时不应因错误元数据重复请求')
+  const conflictingSizeLogs = await request(`/api/admin/logs?requestId=${conflictingSizeResult.response.headers.get('x-request-id')}`, { headers: { Cookie: cookie } })
+  if (!conflictingSizeLogs.payload.logs.some((item) => item.details?.responseReportedSize === '1536x1024' && item.details?.responseVerifiedSize === '2880x2880' && item.details?.sizeMismatch === false)) throw new Error('响应声明尺寸与真实 PNG 尺寸未分开记录')
   const sseResult = await rawRequest('/api-proxy/images/generations', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -755,7 +862,7 @@ try {
   }
   const siteBeforeReset = await request('/api/site-config')
   const resetResult = await request('/api/admin/settings/reset', { method: 'POST', headers: adminHeaders(cookie), body: JSON.stringify({ scope: 'routing' }) })
-  if (resetResult.payload.queue.concurrency !== 2 || resetResult.payload.queue.perIpConcurrency !== 2 || resetResult.payload.queue.perIpQueueLimit !== 5 || resetResult.payload.queue.streamEnabled !== true || resetResult.payload.queue.autoFallbackOnMismatch !== false || JSON.stringify(resetResult.payload.queue.gptRoutes) !== JSON.stringify(recommendedRoutes)) throw new Error('恢复推荐设置未正确保留队列或恢复路由')
+  if (resetResult.payload.queue.concurrency !== 2 || resetResult.payload.queue.perIpConcurrency !== 2 || resetResult.payload.queue.perIpQueueLimit !== 5 || resetResult.payload.queue.streamEnabled !== false || resetResult.payload.queue.autoFallbackOnMismatch !== false || JSON.stringify(resetResult.payload.queue.gptRoutes) !== JSON.stringify(recommendedRoutes)) throw new Error('恢复推荐设置未正确保留队列或恢复路由')
   const siteAfterReset = await request('/api/site-config')
   if (JSON.stringify(siteAfterReset.payload) !== JSON.stringify(siteBeforeReset.payload)) throw new Error('恢复推荐设置意外修改首页设置')
 

@@ -1,4 +1,4 @@
-import type { ApiProvider, TaskParams, TaskRecord } from '../types'
+import type { ApiProvider, ImageRequestMetadata, TaskParams, TaskRecord } from '../types'
 
 type TaskLifecyclePatch = Pick<TaskRecord, 'status' | 'error' | 'finishedAt' | 'elapsed'>
 type ActualParams = Partial<TaskParams>
@@ -58,12 +58,27 @@ export function mapActualParamsByImage(outputIds: string[], paramsList: Array<Ac
   return mapped && Object.keys(mapped).length > 0 ? mapped : undefined
 }
 
+export function mapRequestMetadataByImage(outputIds: string[], metadataList: Array<ImageRequestMetadata | undefined> | undefined) {
+  const mapped = metadataList?.reduce<Record<string, ImageRequestMetadata>>((acc, metadata, index) => {
+    const imgId = outputIds[index]
+    if (imgId && metadata && (metadata.requestId || metadata.upstreamChannel || metadata.upstreamModel)) {
+      acc[imgId] = {
+        ...(metadata.requestId ? { requestId: metadata.requestId } : {}),
+        ...(metadata.upstreamChannel ? { upstreamChannel: metadata.upstreamChannel } : {}),
+        ...(metadata.upstreamModel ? { upstreamModel: metadata.upstreamModel } : {}),
+      }
+    }
+    return acc
+  }, {})
+  return mapped && Object.keys(mapped).length > 0 ? mapped : undefined
+}
+
 export function hasActualSizeParam(params: ActualParams | undefined) {
   return Boolean(params?.size)
 }
 
 export function addImageSizeParam(params: ActualParams | undefined, size: ImageSize | undefined): ActualParams | undefined {
-  if (hasActualSizeParam(params) || !size?.width || !size.height) return params
+  if (!size?.width || !size.height) return params
   return { ...(params ?? {}), size: `${size.width}x${size.height}` }
 }
 
@@ -85,7 +100,7 @@ export function deriveGalleryActualParams(
   const firstParams = firstActualParams(paramsList)
   return {
     ...resultParams,
-    size: resultParams?.size ?? firstParams?.size,
+    size: firstParams?.size ?? resultParams?.size,
     n: outputCount,
   }
 }

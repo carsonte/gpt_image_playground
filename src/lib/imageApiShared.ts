@@ -1,4 +1,4 @@
-import type { AppSettings, ResponsesOutputItem, TaskParams } from '../types'
+import type { AppSettings, ImageRequestMetadata, ResponsesOutputItem, TaskParams } from '../types'
 import { blobToDataUrl } from './dataUrl'
 
 export const MIME_MAP: Record<string, string> = {
@@ -44,6 +44,20 @@ export interface CallApiResult {
   upstreamChannel?: string
   /** 实际完成请求的上游模型 */
   upstreamModel?: string
+  /** 每张图片对应的托管请求与实际上游信息 */
+  requestMetadataList?: Array<ImageRequestMetadata | undefined>
+}
+
+export function getImageRequestMetadata(headers: Headers): ImageRequestMetadata | undefined {
+  const requestId = headers.get('x-request-id')?.trim()
+  const upstreamChannel = headers.get('x-image-upstream')?.trim()
+  const upstreamModel = headers.get('x-image-model')?.trim()
+  if (!requestId && !upstreamChannel && !upstreamModel) return undefined
+  return {
+    ...(requestId ? { requestId } : {}),
+    ...(upstreamChannel ? { upstreamChannel } : {}),
+    ...(upstreamModel ? { upstreamModel } : {}),
+  }
 }
 
 export function isHttpUrl(value: unknown): value is string {

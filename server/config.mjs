@@ -5,6 +5,11 @@ function readInt(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback
 }
 
+function readNonNegativeInt(name, fallback) {
+  const value = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isFinite(value) && value >= 0 ? value : fallback
+}
+
 export const config = {
   host: process.env.HOST?.trim() || '127.0.0.1',
   port: readInt('PORT', 8788),
@@ -39,7 +44,7 @@ export const config = {
   requestLogRetentionDays: readInt('REQUEST_LOG_RETENTION_DAYS', 30),
   auditLogRetentionDays: readInt('AUDIT_LOG_RETENTION_DAYS', 180),
   ipActivityRetentionDays: readInt('IP_ACTIVITY_RETENTION_DAYS', 90),
-  trustProxy: readInt('TRUST_PROXY', 1),
+  trustProxy: readNonNegativeInt('TRUST_PROXY', 1),
   isProduction: process.env.NODE_ENV === 'production',
 }
 

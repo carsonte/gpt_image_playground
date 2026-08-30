@@ -172,6 +172,12 @@ export interface AgentInputDraft {
 
 export type TaskStatus = 'running' | 'done' | 'error'
 
+export interface ImageRequestMetadata {
+  requestId?: string
+  upstreamChannel?: string
+  upstreamModel?: string
+}
+
 export interface TaskRecord {
   id: string
   prompt: string
@@ -186,6 +192,14 @@ export interface TaskRecord {
   apiMode?: ApiMode
   /** 生成时使用的模型 ID */
   apiModel?: string
+  /** 托管代理返回的生成请求 ID */
+  managedRequestId?: string
+  /** 实际完成请求的上游线路 */
+  upstreamChannel?: string
+  /** 实际完成请求的上游模型 */
+  upstreamModel?: string
+  /** 输出图片对应的托管请求与实际上游信息，key 为 outputImages 中的图片 id */
+  requestMetadataByImage?: Record<string, ImageRequestMetadata>
   /** fal.ai 队列请求 ID，用于连接断开后的结果恢复 */
   falRequestId?: string
   /** fal.ai 队列 endpoint，用于连接断开后的状态和结果查询 */

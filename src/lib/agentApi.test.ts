@@ -53,7 +53,12 @@ describe('callAgentResponsesApi', () => {
     ].join('\n')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
       status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'X-Request-Id': 'agent-request',
+        'X-Image-Upstream': 'catapi',
+        'X-Image-Model': 'gpt-image-2-4k',
+      },
     }))
     const textDeltas: string[] = []
     const profile = createDefaultOpenAIProfile({
@@ -81,7 +86,13 @@ describe('callAgentResponsesApi', () => {
     expect(result).toMatchObject({
       responseId: 'resp_1',
       text: 'Hello',
-      images: [{ toolCallId: 'ig_1', dataUrl: 'data:image/png;base64,ZmluYWw=' }],
+      images: [{
+        toolCallId: 'ig_1',
+        dataUrl: 'data:image/png;base64,ZmluYWw=',
+        requestId: 'agent-request',
+        upstreamChannel: 'catapi',
+        upstreamModel: 'gpt-image-2-4k',
+      }],
     })
   })
 

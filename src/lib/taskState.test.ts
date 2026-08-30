@@ -9,6 +9,7 @@ import {
   deriveGalleryActualParams,
   firstActualParams,
   mapActualParamsByImage,
+  mapRequestMetadataByImage,
   mapRevisedPromptsByImage,
   markInterruptedOpenAIRunningTasks,
 } from './taskState'
@@ -79,12 +80,12 @@ describe('task lifecycle patches', () => {
 })
 
 describe('task actual params', () => {
-  it('fills missing sizes without overriding API-returned sizes', () => {
+  it('uses decoded image sizes over API-returned sizes', () => {
     expect(addImageSizeParam({ output_format: 'png' }, { width: 1254, height: 1254 })).toEqual({
       output_format: 'png',
       size: '1254x1254',
     })
-    expect(addImageSizeParam({ size: '1024x1024' }, { width: 1254, height: 1254 })).toEqual({ size: '1024x1024' })
+    expect(addImageSizeParam({ size: '1024x1024' }, { width: 1254, height: 1254 })).toEqual({ size: '1254x1254' })
     expect(addImageSizeParam(undefined, { width: 0, height: 1254 })).toBeUndefined()
   })
 
@@ -97,6 +98,17 @@ describe('task actual params', () => {
     })
   })
 
+  it('maps request metadata to matching output ids', () => {
+    expect(mapRequestMetadataByImage(['image-a', 'image-b', 'image-c'], [
+      { requestId: 'request-a', upstreamChannel: 'primary', upstreamModel: 'gpt-image-2' },
+      undefined,
+      { requestId: 'request-c', upstreamChannel: 'catapi', upstreamModel: 'gpt-image-2-4k' },
+    ])).toEqual({
+      'image-a': { requestId: 'request-a', upstreamChannel: 'primary', upstreamModel: 'gpt-image-2' },
+      'image-c': { requestId: 'request-c', upstreamChannel: 'catapi', upstreamModel: 'gpt-image-2-4k' },
+    })
+  })
+
   it('derives Agent single-image params with a fixed output count', () => {
     expect(deriveAgentImageActualParams({ output_format: 'webp' }, { width: 1536, height: 1024 })).toEqual({
       output_format: 'webp',
@@ -104,7 +116,7 @@ describe('task actual params', () => {
       n: 1,
     })
     expect(deriveAgentImageActualParams({ size: '1024x1024' }, { width: 1536, height: 1024 })).toEqual({
-      size: '1024x1024',
+      size: '1536x1024',
       n: 1,
     })
   })
@@ -114,7 +126,7 @@ describe('task actual params', () => {
 
     expect(deriveGalleryActualParams('fal', false, { n: 8 }, paramsList, 1)).toEqual(paramsList[0])
     expect(deriveGalleryActualParams('custom-provider', true, { n: 8 }, paramsList, 1)).toEqual(paramsList[0])
-    expect(deriveGalleryActualParams('openai', false, { output_format: 'png' }, paramsList, 2)).toEqual({
+    expect(deriveGalleryActualParams('openai', false, { output_format: 'png', size: '3840x2160' }, paramsList, 2)).toEqual({
       output_format: 'png',
       size: '1254x1254',
       n: 2,

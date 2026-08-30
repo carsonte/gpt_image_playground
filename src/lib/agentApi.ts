@@ -1,12 +1,12 @@
-import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
+import { DEFAULT_AGENT_MAX_TOOL_ROUNDS, DEFAULT_STREAM_PARTIAL_IMAGES, type ApiProfile, type AppSettings, type ImageRequestMetadata, type ResponsesApiResponse, type ResponsesOutputItem, type TaskParams } from '../types'
 import { buildApiUrl, readClientDevProxyConfig, shouldUseApiProxy } from './devProxy'
-import { appendStreamingFormatHint, getApiErrorMessage, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
+import { appendStreamingFormatHint, getApiErrorMessage, getImageRequestMetadata, getResponsesImageResultBase64, maybeAppendStreamingHint, MIME_MAP, normalizeBase64Image, pickActualParams, PROMPT_REWRITE_GUARD_PREFIX } from './imageApiShared'
 import { normalizeResponsesOutputItems } from './responsesOutputState'
 import { isEventStreamResponse, readJsonServerSentEvents, throwIfAborted } from './serverSentEvents'
 import { getProfileImageModule } from './imageModules'
 import { isServerManagedApi } from './serverManagedApi'
 
-export interface AgentApiResultImage {
+export interface AgentApiResultImage extends ImageRequestMetadata {
   toolCallId?: string
   action?: string
   dataUrl: string
@@ -437,7 +437,7 @@ function parseAgentConversationTitleXml(text: string) {
   return `${chars.slice(0, AGENT_TITLE_MAX_LENGTH - 3).join('')}...`
 }
 
-function extractImages(payload: ResponsesApiResponse, fallbackMime: string): AgentApiResultImage[] {
+function extractImages(payload: ResponsesApiResponse, fallbackMime: string, requestMetadata?: ImageRequestMetadata): AgentApiResultImage[] {
   const images: AgentApiResultImage[] = []
 
   for (const item of payload.output ?? []) {
@@ -446,6 +446,7 @@ function extractImages(payload: ResponsesApiResponse, fallbackMime: string): Age
     const b64 = getResponsesImageResultBase64(item.result)
     if (!b64) continue
     images.push({
+      ...(requestMetadata ?? {}),
       toolCallId: typeof item.id === 'string' ? item.id : undefined,
       action: typeof item.action === 'string' ? item.action : undefined,
       dataUrl: normalizeBase64Image(b64, fallbackMime),
@@ -457,12 +458,13 @@ function extractImages(payload: ResponsesApiResponse, fallbackMime: string): Age
   return images
 }
 
-function extractImageFromOutputItem(item: ResponsesOutputItem, fallbackMime: string): AgentApiResultImage | null {
+function extractImageFromOutputItem(item: ResponsesOutputItem, fallbackMime: string, requestMetadata?: ImageRequestMetadata): AgentApiResultImage | null {
   if (item.type !== 'image_generation_call') return null
 
   const b64 = getResponsesImageResultBase64(item.result)
   if (!b64) return null
   return {
+    ...(requestMetadata ?? {}),
     toolCallId: typeof item.id === 'string' ? item.id : undefined,
     action: typeof item.action === 'string' ? item.action : undefined,
     dataUrl: normalizeBase64Image(b64, fallbackMime),
@@ -504,6 +506,7 @@ async function parseAgentStreamResponse(
   onImageToolCompleted?: (image: AgentApiResultImage) => void | Promise<void>,
   onImageToolFailed?: (event: AgentApiImageToolFailure) => void | Promise<void>,
 ): Promise<AgentApiResult> {
+  const requestMetadata = getImageRequestMetadata(response.headers)
   let completedPayload: ResponsesApiResponse | null = null
   const outputItems: ResponsesOutputItem[] = []
   let streamedText = ''
@@ -620,7 +623,7 @@ async function parseAgentStreamResponse(
         return
       }
 
-      const image = item ? extractImageFromOutputItem(item, mime) : null
+      const image = item ? extractImageFromOutputItem(item, mime, requestMetadata) : null
       if (image) await onImageToolCompleted?.(image)
       return
     }
@@ -642,7 +645,7 @@ async function parseAgentStreamResponse(
   return {
     responseId: payload.id,
     text,
-    images: extractImages(payload, mime),
+    images: extractImages(payload, mime, requestMetadata),
     outputItems: payload.output ?? [],
     rawResponsePayload: JSON.stringify(payload, null, 2),
   }
@@ -713,7 +716,7 @@ export async function callAgentResponsesApi(opts: {
     return {
       responseId: payload.id,
       text: extractText(payload),
-      images: extractImages(payload, mime),
+      images: extractImages(payload, mime, getImageRequestMetadata(response.headers)),
       outputItems: payload.output,
       rawResponsePayload: JSON.stringify(payload, null, 2),
     }
@@ -882,6 +885,8 @@ export async function callBatchImageSingle(opts: {
       return { batchItemId, image: null, error: maybeAppendStreamingHint(errorMsg, response.status, profile.streamImages) }
     }
 
+    const requestMetadata = getImageRequestMetadata(response.headers)
+
     // Handle streaming
     if (isEventStreamResponse(response)) {
       await onImageToolStarted?.()
@@ -906,7 +911,7 @@ export async function callBatchImageSingle(opts: {
           const payload = getStreamResponsePayload(event)
           const item = payload?.output?.[0]
           if (item) {
-            const img = extractImageFromOutputItem(item, mime)
+            const img = extractImageFromOutputItem(item, mime, requestMetadata)
             if (img) {
               completedImage = img
               await onImageToolCompleted?.(img)
@@ -919,7 +924,7 @@ export async function callBatchImageSingle(opts: {
           const payload = getStreamResponsePayload(event)
           if (payload) rawPayload = JSON.stringify(payload, null, 2)
           if (!completedImage && payload) {
-            const images = extractImages(payload, mime)
+            const images = extractImages(payload, mime, requestMetadata)
             if (images.length > 0) {
               completedImage = images[0]
               await onImageToolCompleted?.(completedImage)
@@ -943,7 +948,7 @@ export async function callBatchImageSingle(opts: {
     // Non-streaming
     const payload = normalizeResponsePayload(await response.json())
     if (!payload) throw new Error('图像接口返回格式无效')
-    const images = extractImages(payload, mime)
+    const images = extractImages(payload, mime, requestMetadata)
     const image = images[0] ?? null
     if (image) await onImageToolCompleted?.(image)
     return {

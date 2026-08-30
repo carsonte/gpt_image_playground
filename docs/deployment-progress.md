@@ -41,7 +41,7 @@
 
 ## 当前状态
 
-- 本地项目目录：`C:\Users\wooop\Desktop\gpt-img`
+- 本地项目目录：`/Users/yanxiang/Desktop/gpt-img-codex-handoff-2969ce9`
 - 正式域名：`https://img2.blackengine.top`
 - 管理后台：`https://img2.blackengine.top/admin`
 - 宝塔服务器：`81.71.96.181`

@@ -71,7 +71,7 @@ describe('GPT routing settings', () => {
   })
 
   it('maps legacy stream modes to the boolean setting', () => {
-    expect(RECOMMENDED_STREAM_ENABLED).toBe(true)
+    expect(RECOMMENDED_STREAM_ENABLED).toBe(false)
     expect(RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH).toBe(false)
     expect(streamEnabledFromLegacyMode('off')).toBe(false)
     expect(streamEnabledFromLegacyMode('CLIENT')).toBe(true)
@@ -79,6 +79,7 @@ describe('GPT routing settings', () => {
     expect(normalizeStreamEnabled('yes')).toBe(true)
     expect(normalizeStreamMode('client')).toBe('client')
     expect(normalizeStreamMode('on')).toBe('client')
+    expect(normalizeStreamMode(undefined)).toBe('off')
     expect(streamEnabledFromLegacyMode('force')).toBe(true)
     expect(streamModeFromEnabled(false)).toBe('off')
     expect(streamModeFromEnabled(true)).toBe('client')

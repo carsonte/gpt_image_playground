@@ -66,7 +66,7 @@ import { canonicalizeBatchFunctionCallArguments, countResponseToolCalls, createR
 import { cleanStaleAgentInputDrafts, clearInputDraftState, isEmptyAgentInputDraft, normalizeAgentInputDrafts, remapAgentInputDraftMentionsForPathChange, restoreAgentInputDraftState, restoreGalleryInputDraftState, saveActiveAgentInputDrafts, saveGalleryInputDraft, syncActiveInputDraft, updateInputDraftImages } from './lib/inputDraftState'
 import { ALL_FAVORITES_COLLECTION_ID, DEFAULT_FAVORITE_COLLECTION_ID, createDefaultFavoriteCollection, deleteFavoriteCollectionState, ensureDefaultFavoriteCollection, getTaskFavoriteCollectionIds, mergeFavoriteCollections, normalizeFavoriteCollectionIds, normalizeFavoriteCollectionName, normalizeFavoriteCollections, normalizeFavoritePatch, normalizeLoadedFavoriteState, resolveDefaultFavoriteCollectionId, sameFavoriteCollectionIds } from './lib/favoriteState'
 import { createPersistedState, mergePersistedAgentConversations, migratePersistedState, normalizePersistedState } from './lib/persistedState'
-import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, hasActualSizeParam, mapActualParamsByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
+import { addImageSizeParam, createTaskDonePatch, createTaskErrorPatch, deriveAgentImageActualParams, deriveGalleryActualParams, firstActualParams, hasActualParams, mapActualParamsByImage, mapRequestMetadataByImage, mapRevisedPromptsByImage, markInterruptedOpenAIRunningTasks } from './lib/taskState'
 import { DEFAULT_MANAGED_GPT_SIZE, stripInjectedCodexCliSizePrompt } from './lib/size'
 import { getProfileImageModule, isSenseNovaU1Size } from './lib/imageModules'
 import { isServerManagedApi, reportManagedGenerationResult } from './lib/serverManagedApi'
@@ -1366,14 +1366,13 @@ async function resolveImageSizeParamsList(
   sizes?: Array<{ width?: number; height?: number } | undefined>,
 ): Promise<Array<Partial<TaskParams> | undefined>> {
   const withStoredSizes = images.map((_, index) => addImageSizeParam(preferred?.[index], sizes?.[index]))
-  if (withStoredSizes.every(hasActualSizeParam)) {
+  if (images.every((_, index) => sizes?.[index]?.width && sizes[index]?.height)) {
     return withStoredSizes
   }
   const fallback = await readImageSizeParamsList(images)
   return images.map((_, index) => {
     const params = withStoredSizes[index]
     const fallbackParams = fallback[index]
-    if (hasActualSizeParam(params)) return params
     if (fallbackParams?.size) return { ...(params ?? {}), size: fallbackParams.size }
     return hasActualParams(params) ? params : fallbackParams
   })
@@ -2710,6 +2709,10 @@ async function executeAgentRound(
       updateTaskInStore(taskId, {
         prompt: image.revisedPrompt ?? latestBeforeUpdate.prompt,
         outputImages: [stored.id],
+        managedRequestId: image.requestId,
+        upstreamChannel: image.upstreamChannel,
+        upstreamModel: image.upstreamModel,
+        requestMetadataByImage: mapRequestMetadataByImage([stored.id], [image]),
         actualParams,
         actualParamsByImage: { [stored.id]: actualParams },
         revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -2896,8 +2899,14 @@ async function executeAgentRound(
       })
       if (opts.signal.aborted) throw createAgentAbortError()
       const dataUrl = result.images[0]
+      const requestMetadata = result.requestMetadataList?.[0] ?? {
+        ...(result.requestId ? { requestId: result.requestId } : {}),
+        ...(result.upstreamChannel ? { upstreamChannel: result.upstreamChannel } : {}),
+        ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
+      }
       return {
         image: dataUrl ? {
+          ...requestMetadata,
           dataUrl,
           actualParams: result.actualParamsList?.[0] ?? result.actualParams,
           revisedPrompt: result.revisedPrompts?.[0] ?? opts.prompt,
@@ -3253,6 +3262,10 @@ async function executeAgentRound(
           maskTargetImageId: round?.maskTargetImageId ?? null,
           maskImageId: round?.maskImageId ?? null,
           outputImages: [stored.id],
+          managedRequestId: image.requestId,
+          upstreamChannel: image.upstreamChannel,
+          upstreamModel: image.upstreamModel,
+          requestMetadataByImage: mapRequestMetadataByImage([stored.id], [image]),
           actualParams,
           actualParamsByImage: { [stored.id]: actualParams },
           revisedPromptByImage: image.revisedPrompt ? { [stored.id]: image.revisedPrompt } : undefined,
@@ -3624,6 +3637,7 @@ async function executeTask(taskId: string) {
     void reportManagedGenerationResult(result.requestId, actualParamsList[0]?.size, actualParamsList[0]?.quality)
     const shouldStoreRevisedPrompts = taskProvider !== 'fal' && !isAsyncCustomTask
     const actualParamsByImage = mapActualParamsByImage(outputIds, actualParamsList)
+    const requestMetadataByImage = mapRequestMetadataByImage(outputIds, result.requestMetadataList ?? outputIds.map(() => result))
     const revisedPrompts = activeProfile.codexCli && task.sourceMode !== 'agent'
       ? result.revisedPrompts?.map((prompt) => prompt == null ? prompt : stripInjectedCodexCliSizePrompt(prompt, requestPrompt, task.params.size))
       : result.revisedPrompts
@@ -3656,6 +3670,10 @@ async function executeTask(taskId: string) {
       outputErrors: result.failedRequests?.length ? result.failedRequests : undefined,
       streamPartialImageIds: undefined,
       rawImageUrls: result.rawImageUrls?.length ? result.rawImageUrls : undefined,
+      managedRequestId: result.requestId,
+      upstreamChannel: result.upstreamChannel,
+      upstreamModel: result.upstreamModel,
+      requestMetadataByImage,
       actualParams,
       actualParamsByImage,
       revisedPromptByImage,
@@ -4596,4 +4614,3 @@ export async function addImageFromUrl(src: string): Promise<void> {
   cacheImage(id, dataUrl)
   useStore.getState().addInputImage({ id, dataUrl })
 }
-

@@ -12,6 +12,7 @@ import {
   getApiErrorMessage,
   getDataUrlDecodedByteSize,
   getDataUrlEncodedByteSize,
+  getImageRequestMetadata,
   getResponsesImageResultBase64,
   isDataUrl,
   isHttpUrl,
@@ -42,6 +43,16 @@ function createOpenAICompatiblePaths() {
   return {
     generationPath: 'images/generations',
     editPath: 'images/edits',
+  }
+}
+
+function addResponseRequestMetadata(result: CallApiResult, response: Response): CallApiResult {
+  const metadata = getImageRequestMetadata(response.headers)
+  if (!metadata) return result
+  return {
+    ...result,
+    ...metadata,
+    requestMetadataList: result.images.map(() => metadata),
   }
 }
 
@@ -637,15 +648,7 @@ async function callImagesApiSingle(opts: CallApiOptions, profile: ApiProfile): P
     const result = isEventStreamResponse(response)
       ? await parseImagesApiStreamResponse(response, mime, opts.onPartialImage, controller.signal)
       : await parseImagesApiResponse(await response.json() as ImageApiResponse, mime, controller.signal)
-    const requestId = response.headers.get('x-request-id')?.trim()
-    const upstreamChannel = response.headers.get('x-image-upstream')?.trim()
-    const upstreamModel = response.headers.get('x-image-model')?.trim()
-    return {
-      ...result,
-      ...(requestId ? { requestId } : {}),
-      ...(upstreamChannel ? { upstreamChannel } : {}),
-      ...(upstreamModel ? { upstreamModel } : {}),
-    }
+    return addResponseRequestMetadata(result, response)
   } finally {
     clearTimeout(timeoutId)
   }
@@ -986,6 +989,20 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
     result.revisedPrompts?.length ? result.revisedPrompts : result.images.map(() => undefined),
   )
   const rawImageUrls = successfulResults.flatMap((result) => result.rawImageUrls ?? [])
+  const requestMetadataList = successfulResults.flatMap((result) => result.images.map((_, index) =>
+    result.requestMetadataList
+      ? result.requestMetadataList[index]
+      : result.requestId || result.upstreamChannel || result.upstreamModel
+        ? {
+            ...(result.requestId ? { requestId: result.requestId } : {}),
+            ...(result.upstreamChannel ? { upstreamChannel: result.upstreamChannel } : {}),
+            ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
+          }
+        : undefined,
+  ))
+  const firstRequestMetadata = requestMetadataList.find((metadata) =>
+    metadata?.requestId || metadata?.upstreamChannel || metadata?.upstreamModel,
+  )
   const failedRequests = results.flatMap((result, requestIndex) =>
     result.status === 'rejected' ? [{ requestIndex, error: getErrorMessage(result.reason) }] : [],
   )
@@ -996,10 +1013,11 @@ function mergeConcurrentApiResults(results: PromiseSettledResult<CallApiResult>[
     actualParamsList,
     revisedPrompts,
     ...(rawImageUrls.length ? { rawImageUrls } : {}),
+    ...(firstRequestMetadata ? { requestMetadataList } : {}),
     ...(failedRequests.length ? { failedRequests } : {}),
-    ...(successfulResults[0].requestId ? { requestId: successfulResults[0].requestId } : {}),
-    ...(successfulResults[0].upstreamChannel ? { upstreamChannel: successfulResults[0].upstreamChannel } : {}),
-    ...(successfulResults[0].upstreamModel ? { upstreamModel: successfulResults[0].upstreamModel } : {}),
+    ...(firstRequestMetadata?.requestId ? { requestId: firstRequestMetadata.requestId } : {}),
+    ...(firstRequestMetadata?.upstreamChannel ? { upstreamChannel: firstRequestMetadata.upstreamChannel } : {}),
+    ...(firstRequestMetadata?.upstreamModel ? { upstreamModel: firstRequestMetadata.upstreamModel } : {}),
   }
 }
 
@@ -1083,7 +1101,8 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
 
     // 服务器策略可能在用户配置关闭时仍强制返回 SSE。
     if (isEventStreamResponse(response)) {
-      return parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
+      const result = await parseResponsesApiStreamResponse(response, mime, opts.onPartialImage)
+      return addResponseRequestMetadata(result, response)
     }
 
     const payload = await response.json() as ResponsesApiResponse
@@ -1091,14 +1110,14 @@ async function callResponsesImageApiSingle(opts: CallApiOptions, profile: ApiPro
     const actualParams = mergeActualParams(
       imageResults[0]?.actualParams ?? {},
     )
-    return {
+    return addResponseRequestMetadata({
       images: imageResults.map((result) => result.image),
       actualParams,
       actualParamsList: imageResults.map((result) =>
         mergeActualParams(result.actualParams ?? {}),
       ),
       revisedPrompts: imageResults.map((result) => result.revisedPrompt),
-    }
+    }, response)
   } finally {
     clearTimeout(timeoutId)
   }

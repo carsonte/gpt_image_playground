@@ -5,7 +5,7 @@ export const GPT_ACTIONS = ['generate', 'edit']
 export const GPT_TIERS = ['2K', '4K']
 // 旧版本使用 off/client/force 三态；新设置只保留是否允许流式的布尔值。
 export const STREAM_MODES = ['off', 'client', 'force']
-export const RECOMMENDED_STREAM_ENABLED = true
+export const RECOMMENDED_STREAM_ENABLED = false
 export const RECOMMENDED_AUTO_FALLBACK_ON_MISMATCH = false
 
 // 当前实测 Sixoner 更容易保持 high 和目标尺寸，因此作为四组默认首选。

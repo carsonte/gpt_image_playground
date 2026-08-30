@@ -648,7 +648,12 @@ describe('callImageApi', () => {
         data: [{ b64_json: `aW1hZ2Ut${callIndex}` }],
       }), {
         status: 200,
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-Id': `request-${callIndex}`,
+          'X-Image-Upstream': callIndex === 1 ? 'primary' : 'catapi',
+          'X-Image-Model': callIndex === 1 ? 'gpt-image-2' : 'gpt-image-2-4k',
+        },
       })
     })
 
@@ -666,6 +671,15 @@ describe('callImageApi', () => {
     ])
     expect(result.failedRequests).toEqual([{ requestIndex: 1, error: 'Failed to fetch' }])
     expect(result.actualParams).toMatchObject({ n: 2 })
+    expect(result.requestMetadataList).toEqual([
+      { requestId: 'request-1', upstreamChannel: 'primary', upstreamModel: 'gpt-image-2' },
+      { requestId: 'request-3', upstreamChannel: 'catapi', upstreamModel: 'gpt-image-2-4k' },
+    ])
+    expect(result).toMatchObject({
+      requestId: 'request-1',
+      upstreamChannel: 'primary',
+      upstreamModel: 'gpt-image-2',
+    })
   })
 
   it('streams Responses API partial images and resolves the completed response image', async () => {
@@ -679,7 +693,12 @@ describe('callImageApi', () => {
     ].join('\n')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(streamBody, {
       status: 200,
-      headers: { 'Content-Type': 'text/event-stream' },
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'X-Request-Id': 'responses-request',
+        'X-Image-Upstream': 'sixoner',
+        'X-Image-Model': 'gpt-image-2-4k',
+      },
     }))
     const partialImages: string[] = []
 
@@ -714,6 +733,7 @@ describe('callImageApi', () => {
       actualParams: { size: '1024x1024' },
       actualParamsList: [{ size: '1024x1024' }],
       revisedPrompts: ['rewritten'],
+      requestMetadataList: [{ requestId: 'responses-request', upstreamChannel: 'sixoner', upstreamModel: 'gpt-image-2-4k' }],
     })
   })
 

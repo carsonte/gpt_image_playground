@@ -215,10 +215,10 @@ function normalizeRoutingSettings(settings: QueueSettings): RoutingSettings {
   const gptRoutes = normalizeGptRoutes(settings.gptRoutes)
   const recommendedGptRoutes = normalizeGptRoutes(settings.recommendedGptRoutes)
   return {
-    streamEnabled: typeof settings.streamEnabled === 'boolean' ? settings.streamEnabled : settings.streamMode !== 'off',
+    streamEnabled: typeof settings.streamEnabled === 'boolean' ? settings.streamEnabled : settings.streamMode === 'client' || settings.streamMode === 'force',
     autoFallbackOnMismatch: settings.autoFallbackOnMismatch === true,
     gptRoutes,
-    recommendedStreamEnabled: settings.recommendedStreamEnabled !== false,
+    recommendedStreamEnabled: settings.recommendedStreamEnabled === true,
     recommendedAutoFallbackOnMismatch: settings.recommendedAutoFallbackOnMismatch === true,
     recommendedGptRoutes,
     configured: {
@@ -414,7 +414,7 @@ export default function AdminApp() {
           senseNovaPerIpConcurrency: Number(senseNovaPerIpConcurrencyInput),
           senseNovaPerIpQueueLimit: Number(senseNovaPerIpQueueLimitInput),
           gptChannel: legacyChannel,
-          streamEnabled: routingSettings?.streamEnabled ?? true,
+          streamEnabled: routingSettings?.streamEnabled ?? false,
           autoFallbackOnMismatch: routingSettings?.autoFallbackOnMismatch ?? false,
           gptRoutes: routingSettings?.gptRoutes ?? DEFAULT_GPT_ROUTES,
         }),

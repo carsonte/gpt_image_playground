@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "test": "vitest run",
     "test:server": "node scripts/server-smoke.mjs",
+    "test:real-image": "node --env-file-if-exists=.env.server.local scripts/real-image-smoke.mjs",
     "verify:release": "npm test && npm run test:server && npm run build",
     "deploy:server": "node scripts/deploy-server.mjs",
     "test:watch": "vitest"
