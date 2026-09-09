@@ -76,6 +76,12 @@ DEPLOY_REMOTE=origin DEPLOY_BRANCH=main bash deploy/update-server.sh
 
 ## 最近一次生产更新
 
+- 2026-09-06：通过本地直传部署 v0.7.8 代码；源码和 SQLite 已备份，构建与服务健康检查通过。
+- 部署保留了服务器环境配置和数据库路由，并未上传 `.env.server.local`。模型映射和优先级需单独核验更新。
+- 模型实测与配置建议见 [图像模型测试记录](../docs/image-model-tests.md)。
+
+### 历史更新
+
 - 日期：2026-08-22。
 - 版本：`v0.7.6`。
 - 当前功能基线提交：`4e8e4e1`。

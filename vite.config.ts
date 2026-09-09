@@ -80,6 +80,16 @@ export default defineConfig(async ({ command, mode }) => {
   return {
     plugins: [react()],
     base: './',
+    build: {
+      rollupOptions: {
+        output: {
+          manualChunks: {
+            markdown: ['streamdown', '@streamdown/math', 'react-markdown', 'remark-gfm', 'katex'],
+            vendor: ['react', 'react-dom', 'zustand'],
+          },
+        },
+      },
+    },
     define: {
       __APP_VERSION__: JSON.stringify(pkg.version),
       __DEV_PROXY_CONFIG__: JSON.stringify(devProxyConfig),
