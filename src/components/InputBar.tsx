@@ -1569,6 +1569,12 @@ export default function InputBar() {
       params={params}
       setParams={setParams}
       activeProfile={activeProfile}
+      onModelChange={managedGpt ? (model: string) => {
+        const profile = settings.profiles.find((item) => model === 'gpt-image-2'
+          ? getProfileImageModule(item) === 'gpt' && !item.model.startsWith('gpt-image-2.5')
+          : item.model === model)
+        if (profile) useStore.getState().setSettings({ activeProfileId: profile.id })
+      } : undefined}
       isFalProvider={isFalProvider}
       isFalTextToImage={isFalTextToImage}
       displaySize={displaySize}
@@ -1630,6 +1636,7 @@ export default function InputBar() {
             allowAuto={!managedGpt && !isFalTextToImage}
             codexCli={activeProfile.codexCli}
             tiers={managedGpt ? ['2K', '4K'] : undefined}
+            hideTierSelector={activeProfile.model.startsWith('gpt-image-2.5')}
             ratioOnly={managedGpt}
           />
         )

@@ -25,6 +25,7 @@ interface Props {
   allowAuto?: boolean
   codexCli?: boolean
   tiers?: SizeTier[]
+  hideTierSelector?: boolean
   ratioOnly?: boolean
 }
 
@@ -48,7 +49,7 @@ function findPresetForSize(size: string, tiers: SizeTier[]) {
   return null
 }
 
-export default function SizePickerModal({ currentSize, onSelect, onClose, allowAuto = true, codexCli = false, tiers = ALL_TIERS, ratioOnly = false }: Props) {
+export default function SizePickerModal({ currentSize, onSelect, onClose, allowAuto = true, codexCli = false, tiers = ALL_TIERS, ratioOnly = false, hideTierSelector = false }: Props) {
   usePreventBackgroundScroll(true)
 
   const modalRef = useRef<HTMLDivElement>(null)
@@ -251,7 +252,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
 
             {mode === 'ratio' && (
               <div className="space-y-5 animate-fade-in">
-                <section>
+                {!hideTierSelector && <section>
                   <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">基准分辨率</div>
                   <div className={`grid gap-2 ${tiers.length === 2 ? 'grid-cols-2' : 'grid-cols-3'}`}>
                     {tiers.map((item) => {
@@ -300,7 +301,7 @@ export default function SizePickerModal({ currentSize, onSelect, onClose, allowA
                       )
                     })}
                   </div>
-                </section>
+                </section>}
 
                 <section>
                   <div className="mb-2 text-xs font-medium text-gray-400 dark:text-gray-500">图像比例</div>

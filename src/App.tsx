@@ -84,7 +84,16 @@ export default function App() {
                 customProviders: [],
                 profiles: [
                   { ...createDefaultOpenAIProfile(), isDefault: true },
-                  ...(isServerManagedApi() ? [createSenseNovaU1Profile()] : []),
+                  ...(isServerManagedApi() ? [
+                    ...['flare', 'sunburst'].map((variant) => createDefaultOpenAIProfile({
+                      id: `gpt-image-2.5-${variant}`,
+                      name: `GPT Image 2.5 ${variant === 'flare' ? 'Flare' : 'Sunburst'}`,
+                      model: `gpt-image-2.5-${variant}`,
+                      apiMode: 'images',
+                      streamImages: false,
+                    })),
+                    createSenseNovaU1Profile(),
+                  ] : []),
                 ],
               }
             : null

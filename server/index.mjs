@@ -239,6 +239,7 @@ function normalizeManagedGptSize(size) {
 }
 
 function getUpstreamModel(upstream, size) {
+  if (upstream.modelOverride) return upstream.modelOverride
   if (upstream.channel === 'catapi' && getResolutionTier(size) === '2K') return config.catApi2kModel
   if (upstream.channel === 'catapi' && getResolutionTier(size) === '4K') return config.catApi4kModel
   if (upstream.channel === 'sixoner' && getResolutionTier(size) === '2K') return config.sixoner2kModel
@@ -1085,7 +1086,17 @@ app.post('/api-proxy/*path', async (req, res) => {
       if (endpoint === '/images/edits') action = 'edit'
       const activeItem = activeProxyItems.get(requestId)
       if (activeItem) Object.assign(activeItem, { action, prompt, size, imageCount })
-      upstreamChain = getGptUpstreamChain(routingSnapshot.gptRoutes, action, size)
+      const requestedModel = payload?.model ?? readMultipartTextField(body, 'model')
+      const isGpt25 = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst'].includes(requestedModel)
+      // 2.5 只使用已验证的线路，避免回退时悄悄切换为 2.0。
+      upstreamChain = isGpt25
+        ? (config.sixonerApiKey ? [{ ...getGptUpstreams().sixoner, modelOverride: requestedModel }] : [])
+        : getGptUpstreamChain(routingSnapshot.gptRoutes, action, size)
+      if (isGpt25) {
+        effectiveStream = false
+        if (payload) applyJsonStreamPolicy(payload, false)
+        else body = removeMultipartFields(body, req.headers['content-type'], new Set(['stream', 'partial_images']))
+      }
       gptUpstream = upstreamChain[0]
       if (!gptUpstream) {
         const tier = getGptRouteTier(size)

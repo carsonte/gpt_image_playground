@@ -16,6 +16,7 @@ export default function InputParamsPanel({
   params,
   setParams,
   activeProfile,
+  onModelChange,
   isFalProvider,
   isFalTextToImage,
   displaySize,
@@ -57,6 +58,7 @@ export default function InputParamsPanel({
   params: TaskParams
   setParams: (patch: Partial<TaskParams>) => void
   activeProfile: ApiProfile
+  onModelChange?: (model: string) => void
   isFalProvider: boolean
   isFalTextToImage: boolean
   displaySize: string
@@ -96,6 +98,24 @@ export default function InputParamsPanel({
 }) {
   return (
     <div className={`grid ${cols} gap-2 text-xs flex-1`}>
+      {onModelChange && (
+        <label className="flex flex-col gap-0.5 col-span-full">
+          <span className="text-gray-400 dark:text-gray-500 ml-1">生图模型</span>
+          <Select
+            value={activeProfile.model.startsWith('gpt-image-2.5-') ? activeProfile.model : 'gpt-image-2'}
+            onChange={onModelChange}
+            options={[
+              { label: 'GPT Image 2.0', value: 'gpt-image-2' },
+              { label: 'GPT Image 2.5 Flare', value: 'gpt-image-2.5-flare' },
+              { label: 'GPT Image 2.5 Sunburst', value: 'gpt-image-2.5-sunburst' },
+            ]}
+            className={selectClass}
+          />
+          {activeProfile.model.startsWith('gpt-image-2.5-') && (
+            <span className="text-gray-500 dark:text-gray-400 ml-1">2.5 实际输出尺寸可能低于所选尺寸，请以下载图片为准。</span>
+          )}
+        </label>
+      )}
       <label
         className="relative flex flex-col gap-0.5"
         onMouseEnter={sizeHint.show}

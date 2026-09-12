@@ -510,6 +510,25 @@ try {
   const sixonerFallbackPayloads = upstreamPayloads.filter((item) => item.prompt === 'CatAPI 转 Sixoner 测试')
   if (sixonerFallbackPayloads.length !== 2 || sixonerFallbackPayloads.some((item) => item.model !== 'gpt-image-2-4k') || sixonerFallbackResult.response.headers.get('x-image-upstream') !== 'sixoner') throw new Error('CatAPI 失败后未优先回退到 Sixoner 4K 模型')
 
+  for (const model of ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst']) {
+    const result = await request('/api-proxy/images/generations', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt: model, size: '2880x2880', quality: 'high', n: 1, stream: true }),
+    })
+    const forwarded = upstreamPayloads.filter((item) => item.prompt === model)
+    if (result.response.headers.get('x-image-upstream') !== 'sixoner' || result.response.headers.get('x-image-model') !== model || forwarded.length !== 1 || forwarded[0].model !== model || forwarded[0].stream === true) throw new Error('2.5 文生图模型或线路被改写')
+    const form = new FormData()
+    form.append('model', model)
+    form.append('prompt', model)
+    form.append('size', '2048x2048')
+    form.append('stream', 'true')
+    form.append('image[]', new Blob(['reference'], { type: 'image/png' }), 'reference.png')
+    const edited = await request('/api-proxy/images/edits', { method: 'POST', body: form })
+    const sent = upstreamBodies.at(-1)
+    if (edited.response.headers.get('x-image-model') !== model || sent.path !== '/sixoner/v1/images/edits' || !sent.text.includes(model) || !sent.text.includes('reference') || sent.text.includes('name="stream"')) throw new Error('2.5 图生图模型或参考图未正确转发')
+  }
+
   const editForm = new FormData()
   editForm.append('model', 'wrong-model')
   editForm.append('prompt', 'CatAPI 4K 编辑模型路由测试')

@@ -239,8 +239,6 @@ export default function DetailModal() {
     : baseActualParams
   const currentRequestMetadata = currentOutputImageId ? task.requestMetadataByImage?.[currentOutputImageId] : undefined
   const currentManagedRequestId = task.requestMetadataByImage ? currentRequestMetadata?.requestId : task.managedRequestId
-  const currentUpstreamChannel = task.requestMetadataByImage ? currentRequestMetadata?.upstreamChannel : task.upstreamChannel
-  const currentUpstreamModel = task.requestMetadataByImage ? currentRequestMetadata?.upstreamModel : task.upstreamModel
   const currentRevisedPrompt = currentOutputImageId ? task.revisedPromptByImage?.[currentOutputImageId]?.trim() : ''
   // 将 @图N 等 mention 标记和透明背景追加提示词都按实际请求内容比较，
   // 避免仅由本地请求预处理导致的不一致被当作“API 改写”。
@@ -257,7 +255,7 @@ export default function DetailModal() {
   const taskProviderName = taskProvider ? getApiProviderLabel(settings, taskProvider) : '未知'
   const taskProfileName = task.apiProfileName || '未知'
   const taskModel = task.apiModel || '未知'
-  const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel || currentManagedRequestId || currentUpstreamChannel || currentUpstreamModel)
+  const showSourceInfo = Boolean(task.apiProvider || task.apiProfileName || task.apiModel || currentManagedRequestId)
   const isFalReconnecting = task.status === 'error' && task.falRecoverable
   const isCustomReconnecting = task.status === 'error' && task.customRecoverable
   const rawImageUrls = task.rawImageUrls ?? []
@@ -959,12 +957,6 @@ export default function DetailModal() {
                   <span className="font-medium text-gray-700 dark:text-gray-200">{taskProviderName}</span>
                   <span className="text-gray-400 dark:text-gray-500"> · {taskProfileName} · {taskModel}</span>
                 </div>
-                {(currentUpstreamChannel || currentUpstreamModel) && (
-                  <div className="mt-1 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2 text-gray-400 dark:text-gray-500">
-                    实际上游：<span className="font-medium text-gray-700 dark:text-gray-200">{currentUpstreamChannel || '未知'}</span>
-                    {currentUpstreamModel ? ` · ${currentUpstreamModel}` : ''}
-                  </div>
-                )}
                 {currentManagedRequestId && (
                   <div className="mt-1 overflow-x-auto hide-scrollbar whitespace-nowrap mask-edge-r pr-2 text-gray-400 dark:text-gray-500">
                     请求 ID：<span className="font-mono text-gray-700 dark:text-gray-200">{currentManagedRequestId}</span>
